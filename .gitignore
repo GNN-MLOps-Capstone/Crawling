@@ -1,12 +1,19 @@
 # 개인 환경설정 무시
 /.idea/
+.env
+.venv
+
 # 팀 코드 스타일 규칙
 !.idea/codeStyles/
+
 # 코드 검사 규칙
 !.idea/inspectionProfiles/
+
 # 공통 SDK 및 언어 수준 설정
 !.idea/misc.xml
+
 # 버전 관리 설정
 !.idea/vcs.xml
+
 # 런/디버그 설정
 !.idea/runConfigurations/
