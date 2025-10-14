@@ -4,15 +4,11 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 import logging
-import os
-from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from newspaper import Article, Config
 import requests
 from bs4 import BeautifulSoup
-
-# 환경 변수 로드
-load_dotenv()
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 # 로깅 설정
 logging.basicConfig(
@@ -31,14 +27,17 @@ class NewsCrawler:
         self.filtered_domains = self._load_filter_domains()
         self.max_workers = max_workers
         try:
+            pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+            conn_obj = pg_hook.get_connection(conn_id='my_postgres_conn')
+
             self.db_pool = pool.SimpleConnectionPool(
                 minconn=1,
                 maxconn=max_workers + 5,
-                host=os.getenv('DB_HOST'),
-                port=os.getenv('DB_PORT'),
-                database=os.getenv('DB_NAME'),
-                user=os.getenv('DB_USER'),
-                password=os.getenv('DB_PASSWORD')
+                host=conn_obj.host,
+                port=conn_obj.port,
+                database=conn_obj.schema,
+                user=conn_obj.login,
+                password=conn_obj.get_password()
             )
             logger.info(f"데이터베이스 커넥션 풀 생성 완료 (최대 {max_workers + 5}개)")
         except psycopg2.OperationalError as e:
@@ -100,11 +99,6 @@ class NewsCrawler:
             logger.debug(f"[BeautifulSoup] 크롤링 실패 ({url}): {e}")
             return None, response_time_ms
 
-    # ------------------------------------------------------------------
-    # <--- 이 위 3개의 함수가 핵심 변경 사항입니다 ---
-    # ------------------------------------------------------------------
-
-    # ... 이하 다른 모든 메서드들은 기존 코드와 완전히 동일합니다 ...
     def close_pool(self):
         if self.db_pool:
             self.db_pool.closeall()
@@ -260,8 +254,7 @@ class NewsCrawler:
             logger.info(f"평균 처리 시간: {elapsed_time / (success_count + failed_count):.2f}초/건")
         logger.info("=" * 60)
 
-
-if __name__ == "__main__":
+def run_news_crawler():
     crawler = None
     try:
         crawler = NewsCrawler(
@@ -275,3 +268,6 @@ if __name__ == "__main__":
     finally:
         if crawler:
             crawler.close_pool()
+
+if __name__ == "__main__":
+    run_news_crawler()

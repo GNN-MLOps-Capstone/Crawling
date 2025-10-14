@@ -1,13 +1,13 @@
 # collect_naver_news.py
-import os
 import time
 import requests
 import psycopg2
 from datetime import datetime
-from dotenv import load_dotenv
 import re
 from email.utils import parsedate_to_datetime
 import logging
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
 
 # 로깅 설정
 logging.basicConfig(
@@ -20,23 +20,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-
-
 class NaverNewsCollector:
     def __init__(self):
-        self.client_id = os.getenv('NAVER_CLIENT_ID')
-        self.client_secret = os.getenv('NAVER_CLIENT_SECRET')
+        pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+        conn_obj = pg_hook.get_connection(conn_id='my_postgres_conn')
+
+        self.client_id = conn_obj.naver_client_id
+        self.client_secret = conn_obj.naver_client_secret
         self.api_url = "https://openapi.naver.com/v1/search/news.json"
 
-        # DB 연결
-        self.conn = psycopg2.connect(
-            host=os.getenv('DB_HOST'),
-            port=os.getenv('DB_PORT'),
-            database=os.getenv('DB_NAME'),
-            user=os.getenv('DB_USER'),
-            password=os.getenv('DB_PASSWORD')
-        )
+        try:
+            self.conn = psycopg2.connect(
+                host=conn_obj.host,
+                port=conn_obj.port,
+                database=conn_obj.schema,
+                user=conn_obj.login,
+                password=conn_obj.get_password()
+            )
+        except psycopg2.OperationalError as e:
+            logger.error(f"데이터베이스 연결 실패: {e}")
+            raise
 
         # 세션 내 중복 체크용
         self.collected_urls = set()
@@ -164,8 +167,7 @@ class NaverNewsCollector:
         logger.info(f"완료: {collected}개 수집, {inserted_total}개 삽입")
         return inserted_total
 
-
-def main():
+def run_collect_naver_news():
     try:
         collector = NaverNewsCollector()
         collector.collect(query='다', total=1000)
@@ -175,4 +177,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_collect_naver_news()
