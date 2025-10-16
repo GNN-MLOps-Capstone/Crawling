@@ -10,9 +10,13 @@
 ### 브랜치 전략
 
 main (프로덕션)
+
 ↓
+
 develop (개발)
+
 ↓
+
 feature/기능명 (기능 개발)
 
 **브랜치 정책**
@@ -47,6 +51,7 @@ git commit -m "feat: 주가 예측 기능 추가"
 git commit -m "fix:  Airflow 버그 수정"
 git commit -m "refactor: 필터링 코드 수정"
 ```
+
 
 
 
