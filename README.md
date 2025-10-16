@@ -26,6 +26,7 @@ feature/* : 개별 기능/작업 단위 브랜치
 ### 커밋 컨벤션
 
 feat: 새로운 기능
+
 fix: 버그 수정
 refactor: 코드 리팩토링
 style: 코드 포맷팅
@@ -39,6 +40,7 @@ chore: 기타 작업
 git commit -m "feat: 주가 예측 기능 추가"
 git commit -m "fix:  Airflow 버그 수정"
 git commit -m "refactor: 필터링 코드 수정"
+
 
 
 
