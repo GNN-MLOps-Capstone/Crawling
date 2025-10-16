@@ -18,4 +18,4 @@
 # 런/디버그 설정
 !.idea/runConfigurations/
 
-.log
+*.log
