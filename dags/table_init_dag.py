@@ -18,3 +18,4 @@ with DAG(
         conn_id="news_data_db",
         sql="sql/create_news_table.sql",
     )
+
