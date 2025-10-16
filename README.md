@@ -5,6 +5,7 @@
 ## 🚀 핵심 기능
 ## 💻 개발 가이드
 브랜치 전략
+
 main (프로덕션)
   ↓
 develop (개발)
@@ -12,6 +13,7 @@ develop (개발)
 feature/기능명 (기능 개발)
 
 커밋 컨벤션
+
 feat: 새로운 기능
 fix: 버그 수정
 refactor: 코드 리팩토링
@@ -20,8 +22,9 @@ docs: 문서 수정
 test: 테스트 코드
 build: 빌드, 의존성 코드
 chore: 기타 작업
-## 예시:
+예시:
+```
 git commit -m "feat: 주가 예측 기능 추가"
 git commit -m "fix:  Airflow 버그 수정"
 git commit -m "refactor: 필터링 코드 수정"
-
+```
