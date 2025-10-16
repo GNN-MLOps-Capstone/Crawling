@@ -42,11 +42,11 @@ build: 빌드, 의존성 코드
 chore: 기타 작업
 
 예시:
-
+```
 git commit -m "feat: 주가 예측 기능 추가"
 git commit -m "fix:  Airflow 버그 수정"
 git commit -m "refactor: 필터링 코드 수정"
-
+```
 
 
 
