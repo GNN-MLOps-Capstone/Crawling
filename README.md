@@ -9,7 +9,6 @@
 
 ### 브랜치 전략
 
-```mermaid
 graph TD
 A[main (프로덕션)] --> B[develop (개발)]
 B --> C[feature/기능명 (기능 개발)]
@@ -37,6 +36,7 @@ chore: 기타 작업
 git commit -m "feat: 주가 예측 기능 추가"
 git commit -m "fix:  Airflow 버그 수정"
 git commit -m "refactor: 필터링 코드 수정"
+
 
 
 
