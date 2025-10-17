@@ -2,6 +2,7 @@
 /.idea/
 .env
 .venv
+.bak
 
 # 팀 코드 스타일 규칙
 !.idea/codeStyles/
