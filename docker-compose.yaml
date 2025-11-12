@@ -304,6 +304,40 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  prometheus:
+    user: ${PROMETHEUS_USER_ID}
+    iamge: prom/prometheus
+    container_name: prometheus_container
+    volumes:
+      - ./prometheus-grafana/prometheus/config:/etc/prometheus
+      - ./prometheus-grafana/prometheus/volume:/prometheus/data
+    ports:
+      - 9090:9090
+    command:
+      - '--web.enable-lifecycle' # API로 설정파일 로드, 서버 종료 가능. 프로덕션 환경에서 비활성화 권장.
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+    restart: always
+    networks:
+      - app-network
+
+  grafana:
+    user: ${GRAFANA_USER_ID}
+    image: grafana/grafana
+    container_name: grafana_container
+    volumes:
+      - ./prometheus-grafana/grafana/volume:/var/lib/grafana
+    ports:
+      - 3000:3000
+    restart: always
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
 volumes:
   postgres-db-volume:
   news-db-volume:
+  prometheus-volume:
+  grafana-volume:
