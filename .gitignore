@@ -19,4 +19,10 @@
 # 런/디버그 설정
 !.idea/runConfigurations/
 
+#prometheus file
+!prometheus-grafana/prometheus/config
+prometheus-grafana
+logs/
+
+
 *.log
