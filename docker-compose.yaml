@@ -306,7 +306,7 @@ services:
 
   prometheus:
     user: ${PROMETHEUS_USER_ID}
-    iamge: prom/prometheus
+    image: prom/prometheus
     container_name: prometheus_container
     volumes:
       - ./prometheus-grafana/prometheus/config:/etc/prometheus
@@ -331,6 +331,14 @@ services:
     restart: always
     networks:
       - app-network
+
+  #mlflow는 추후에 private-server에 분리할 예정
+  mlflow:
+    build:
+      context: ./mlflow
+      dockerfile: mlflow.yaml
+    ports:
+      - 5001:5000
 
 networks:
   app-network:
