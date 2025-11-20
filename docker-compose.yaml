@@ -369,7 +369,7 @@ services:
   mlflow:
     build:
       context: .
-      dockerfile: Dockerfile.mlflow
+      dockerfile: dockerfile/Dockerfile.mlflow
     container_name: mlflow
     ports:
       - "5001:5000"
@@ -388,7 +388,9 @@ services:
     restart: always
 
   jupyter:
-    image: jupyter/datascience-notebook:python-3.11
+    build:
+      context: .
+      dockerfile: dockerfile/Dockerfile.jupyter
     container_name: jupyter
     ports:
       - "8888:8888"
@@ -412,6 +414,13 @@ services:
       - news-database
       - minio
       - mlflow
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
     restart: always
 
 networks:
