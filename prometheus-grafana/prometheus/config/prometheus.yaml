@@ -1,0 +1,35 @@
+# 요청 주기 설정
+global:
+  scrape_interval: 15s
+  scrape_timeout: 15s
+  evaluation_interval: 2m
+  external_labels:
+    monitor: "codelab-monitor"
+  query_log_file: query_log_file.log
+
+rule_files:
+  - "rules.yaml"
+
+# 수집 대상 설정
+scrape_configs:
+  - job_name: "prometheus"
+    scrape_interval: 10s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    honor_labels: false
+    honor_timestamps: false
+    scheme: http
+    static_configs:
+      - targets: ["prometheus_container:9090"]
+        labels:
+          service: prometheus-1
+
+  - job_name: "airflow"
+    static_configs:
+      - targets: ["airflow_container:8080"]
+        labels:
+          service: airflow-1
+
+  - job_name: "node"
+    static_configs:
+      - targets: ["prometheus_container:9100"]
