@@ -47,7 +47,7 @@
 x-airflow-common:
   &airflow-common
   # In order to add custom dependencies or upgrade provider packages you can use your extended image.
-  # Comment the image line, place your Dockerfile.mlflow in the directory where you placed the docker-compose.yaml
+  # Comment the image line, place your mlflow.Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
   image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5}
   #build: .
@@ -369,7 +369,7 @@ services:
   mlflow:
     build:
       context: .
-      dockerfile: dockerfile/Dockerfile.mlflow
+      dockerfile: dockerfile/mlflow.Dockerfile
     container_name: mlflow
     ports:
       - "5001:5000"
@@ -392,7 +392,7 @@ services:
   jupyter:
     build:
       context: .
-      dockerfile: dockerfile/Dockerfile.jupyter
+      dockerfile: dockerfile/jupyter.Dockerfile
     container_name: jupyter
     ports:
       - "8888:8888"
