@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir torch_geometric
 # Jupyter 및 필수 라이브러리 설치
 RUN pip install --no-cache-dir jupyterlab notebook
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --ignore-installed -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --ignore-installed -r /tmp/requirements_jupyter.txt
 
 # 작업 디렉토리 설정
 WORKDIR /home/jovyan/work
