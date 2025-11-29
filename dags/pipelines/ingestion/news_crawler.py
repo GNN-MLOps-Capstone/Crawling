@@ -255,7 +255,7 @@ def run_news_crawler():
         crawler = NewsCrawler(
             filter_file_path='filter_domain_list_v1.00.txt',
             crawler_version='0.02',  # Hybrid 버전
-            max_workers=10
+            max_workers=4
         )
         crawler.run()
     except Exception as e:

@@ -24,10 +24,14 @@ from news_graph_construction import build_graph
 from preprocessing_experiments import get_preprocessor
 
 # --- Configuration & Environment Variables ---
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5001")
-MLFLOW_S3_ENDPOINT_URL = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MLFLOW_S3_ENDPOINT_URL = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+
+if mlflow.active_run():
+    print("Closing active run...")
+    mlflow.end_run()
 
 # Set MLFlow Tracking URI
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -118,7 +122,7 @@ class Model(torch.nn.Module):
         return preds
 
 # --- Training & Logging ---
-def train_and_log(data, news_feat_dim, num_keywords, num_stocks):
+def train_and_log(data, news_feat_dim, num_keywords, num_stocks, preprocessor_name="baseline"):
     print("Starting training...")
     
     # Split Data
@@ -142,6 +146,7 @@ def train_and_log(data, news_feat_dim, num_keywords, num_stocks):
     val_data = val_data.to(device)
     
     with mlflow.start_run():
+        mlflow.set_tag("preprocessor", preprocessor_name)
         mlflow.log_param("hidden_dim", HIDDEN_DIM)
         mlflow.log_param("out_dim", OUT_DIM)
         mlflow.log_param("epochs", EPOCHS)
@@ -240,7 +245,6 @@ if __name__ == "__main__":
             
         # 2. Clean (Using Strategy)
         preprocessor = get_preprocessor(EXPERIMENT_PREPROCESSOR)
-        mlflow.set_tag("preprocessor", EXPERIMENT_PREPROCESSOR)
         df = preprocessor.process(df)
         
         # 3. Features
@@ -254,7 +258,7 @@ if __name__ == "__main__":
         num_keywords = data['keyword'].x.shape[0]
         num_stocks = data['stock'].x.shape[0]
         
-        embeddings = train_and_log(data, news_feat_dim, num_keywords, num_stocks)
+        embeddings = train_and_log(data, news_feat_dim, num_keywords, num_stocks, EXPERIMENT_PREPROCESSOR)
         
         # 6. Save
         save_to_minio(embeddings, news_map, keyword_map, stock_map)
