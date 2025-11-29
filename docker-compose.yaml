@@ -397,10 +397,13 @@ services:
       dockerfile: dockerfile/mlflow.Dockerfile
     #ports:
     #  - "5001:5000"
+    expose:
+      - 5000
     environment:
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow,mlflow:5000, localhost,127.0.0.1, news-mlflow.hyu.life"
     command: >
       mlflow server
       --backend-store-uri postgresql://${DATA_POSTGRES_USER}:${DATA_POSTGRES_PASSWORD}@news-database:5432/mlflow_db
@@ -421,6 +424,8 @@ services:
       dockerfile: dockerfile/jupyter.Dockerfile
     #ports:
     #  - "8888:8888"
+    expose:
+      - 8888
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
