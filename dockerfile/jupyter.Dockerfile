@@ -37,10 +37,15 @@ RUN pip install --no-cache-dir \
 # PyG 메인 라이브러리 설치
 RUN pip install --no-cache-dir torch_geometric
 
+# 제약 조건 파일 생성
+RUN echo "torch==2.8.0" > /tmp/constraints.txt
+
 # Jupyter 및 필수 라이브러리 설치
 RUN pip install --no-cache-dir jupyterlab notebook
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --ignore-installed -r /tmp/requirements_jupyter.txt
+COPY requirements_jupyter.txt /tmp/requirements_jupyter.txt
+RUN pip install --no-cache-dir --ignore-installed \
+    -r /tmp/requirements_jupyter.txt \
+    -c /tmp/constraints.txt
 
 # 작업 디렉토리 설정
 WORKDIR /home/jovyan/work
