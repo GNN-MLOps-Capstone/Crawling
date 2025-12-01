@@ -24,5 +24,7 @@
 prometheus-grafana
 logs/
 
+#notebooks
+notebooks/
 
 *.log
