@@ -72,6 +72,7 @@ x-airflow-common:
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     AIRFLOW_CONN_NEWS_DATA_DB: "postgresql://${DATA_POSTGRES_USER}:${DATA_POSTGRES_PASSWORD}@news-database:5432/${DATA_POSTGRES_DB_NAME}"
     AIRFLOW_CONN_NAVER_API: "generic://?__extra__=%7B%22naver_client_id%22%3A%22${NAVER_CLIENT_ID}%22%2C%22naver_client_secret%22%3A%22${NAVER_CLIENT_SECRET}%22%7D"
+    AIRFLOW_CONN_MINIO_S3: "aws://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@?endpoint_url=http%3A%2F%2Fminio%3A9000"
 
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -105,18 +106,20 @@ services:
       - news-network
 
   news-database:
-    image: postgres:13
+    image: pgvector/pgvector:pg16-trixie
+    #image: postgres:13
     environment:
       POSTGRES_USER: ${DATA_POSTGRES_USER}
       POSTGRES_PASSWORD: ${DATA_POSTGRES_PASSWORD}
       POSTGRES_DB: ${DATA_POSTGRES_DB_NAME}
     volumes:
-      - news-db-volume:/var/lib/postgresql/data
+      #- news-db-volume:/var/lib/postgresql/data
+      - news-db-volume-v2:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d
     ports:
       - "35432:5432"
     healthcheck:
-      test: [ "CMD", "pg_isready", "-U", "${DATA_POSTGRES_USER}" ]
+      test: [ "CMD", "pg_isready", "-U", "${DATA_POSTGRES_USER}", "-d", "${DATA_POSTGRES_DB_NAME}" ]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -466,7 +469,8 @@ networks:
 
 volumes:
   postgres-db-volume:
-  news-db-volume:
+  #news-db-volume:
+  news-db-volume-v2:
   prometheus-volume:
   grafana-volume:
   minio_data:

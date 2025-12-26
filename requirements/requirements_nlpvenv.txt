@@ -1,0 +1,5 @@
+pandas==2.3.3
+pyarrow==22.0.0
+kiwipiepy==0.22.0
+hanja==0.15.1
+boto3==1.41.0
