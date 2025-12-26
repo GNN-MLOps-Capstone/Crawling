@@ -17,7 +17,7 @@ from pipelines.ingestion.news_crawler import run_news_crawler
 with DAG(
         dag_id="news_dag",
         start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
-        schedule='0 */4 * * *',
+        schedule='0 */3 * * *',
         catchup=False,
         doc_md="""
     ### 
