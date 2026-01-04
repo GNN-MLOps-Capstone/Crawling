@@ -3,3 +3,5 @@ pyarrow==22.0.0
 kiwipiepy==0.22.0
 hanja==0.15.1
 boto3==1.41.0
+ollama==0.6.1
+tqdm==4.67.1
