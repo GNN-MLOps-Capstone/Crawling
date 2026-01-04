@@ -461,6 +461,26 @@ services:
               capabilities: [ gpu ]
     restart: always
 
+#  ollama:
+#    image: ollama/ollama:0.13.5
+#    environment:
+#      - OLLAMA_KEEP_ALIVE=5m
+#    container_name: ollama
+#    ports:
+#      - "11434:11434"
+#    volumes:
+#      - ./ollama:/root/.ollama
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
+#    networks:
+#      - news-network
+#    restart: always
+
 networks:
   news-network:
     driver: bridge
