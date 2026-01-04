@@ -5,6 +5,7 @@ import logging
 
 from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
 
 # 가상환경 내의 파이썬 경로
 PYTHON_VENV_PATH = '/opt/airflow/venv_nlp/bin/python'
@@ -23,7 +24,7 @@ local_tz = pendulum.timezone("Asia/Seoul")
 def news_refinement_pipeline():
     # 1. 실제 정제 로직 (가상환경 실행)
     @task.external_python(python=PYTHON_VENV_PATH)
-    def refine_task_in_venv(updated_dates, aws_conn_info):
+    def refine_task(updated_dates, aws_conn_info):
         import io
         import re
         import html
@@ -187,12 +188,20 @@ def news_refinement_pipeline():
     # --- DAG 구조 정의 (가장 중요한 부분!) ---
     params = prepare_params()
 
-    # params에서 필요한 값을 꺼내어 refine_task_in_venv로 전달
-    # refine_task_in_venv를 여기서 직접 호출하는 것이 TaskFlow API의 올바른 사용법입니다.
-    refine_task_in_venv(
+    refine_task = refine_task(
         updated_dates=params['dates'],
         aws_conn_info=params['aws']
     )
+
+    trigger_keyword_extraction = TriggerDagRunOperator(
+        task_id="trigger_keyword_extraction_dag",
+        trigger_dag_id="news_keyword_extraction",  # 트리거할 대상 DAG의 ID
+        conf={"updated_dates": params['dates']},  # 정제한 날짜 정보를 그대로 전달
+        wait_for_completion=False,  # 키워드 추출이 끝날 때까지 기다리지 않고 종료
+        poke_interval=30
+    )
+
+    refine_task >> trigger_keyword_extraction
 
 
 news_refinement_dag = news_refinement_pipeline()
