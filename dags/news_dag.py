@@ -5,8 +5,8 @@ from airflow.models.dag import DAG
 from airflow.operators.python import PythonVirtualenvOperator
 
 # 실행 함수 import
-from pipelines.ingestion.collect_naver_news import run_collect_naver_news
-from pipelines.ingestion.news_crawler import run_news_crawler
+from modules.ingestion.collect_naver_news import run_collect_naver_news
+from modules.ingestion.news_crawler import run_news_crawler
 
 # def run_collect_naver_news():
 #     print("API 스크립트 실행 (실제 모듈을 찾을 수 없음)")

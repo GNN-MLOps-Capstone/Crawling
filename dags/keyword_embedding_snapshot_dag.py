@@ -11,15 +11,15 @@ default_args = {'owner': 'dongbin', 'retries': 0}
 
 
 @dag(
-    dag_id='news_keyword_extraction_modular',
+    dag_id='keyword_embedding_update_modular',  # ID 변경: Snapshot -> Embedding Update
     default_args=default_args,
     schedule_interval=None,
-    start_date=datetime(2025, 12, 1, tzinfo=local_tz),
+    start_date=datetime(2025, 1, 1, tzinfo=local_tz),
     catchup=False,
     params={"updated_dates": Param([], type="array")},
-    tags=['silver', 'keyword', 'modular']
+    tags=['silver', 'embedding', 'vector', 'update']  # 태그 변경
 )
-def keyword_pipeline():
+def embedding_update_pipeline():
     @task(multiple_outputs=True)
     def prepare_context(**context):
         params = context.get('params', {})
@@ -32,16 +32,17 @@ def keyword_pipeline():
         return {"dates": dates, "aws": aws_info}
 
     @task.external_python(python=PYTHON_VENV_PATH)
-    def task_extract_keywords(updated_dates, aws_conn_info):
+    def task_generate_embeddings(updated_dates, aws_conn_info):
         import sys
         sys.path.append('/opt/airflow/dags')
 
-        # 🟢 Service 호출
-        from modules.analysis.extract_service import run_keyword_extraction
-        return run_keyword_extraction(updated_dates, aws_conn_info)
+        # 🟢 Embedding Service 호출
+        from modules.analysis.keyword_embedding_service import run_embedding_update_service
+        return run_embedding_update_service(updated_dates, aws_conn_info)
 
+    # --- Flow ---
     ctx = prepare_context()
-    task_extract_keywords(ctx['dates'], ctx['aws'])
+    task_generate_embeddings(ctx['dates'], ctx['aws'])
 
 
-keyword_pipeline()
+dag_instance = embedding_update_pipeline()

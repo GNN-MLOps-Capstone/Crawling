@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 
-from pipelines.ingestion.stock_parser import parse_and_load_all
+from modules.ingestion.stock_parser import parse_and_load_all
 
 default_args = {
     'owner': 'airflow',
@@ -24,7 +24,7 @@ with DAG(
         python_callable=parse_and_load_all,
         op_kwargs={
             # 실제 CSV 파일 경로를 여기에 적으세요
-            'csv_path': '/opt/airflow/dags/pipelines/ingestion/stock_list.csv',
+            'csv_path': '/opt/airflow/dags/modules/ingestion/stock_list.csv',
             'conn_id': 'news_data_db'
         }
     )

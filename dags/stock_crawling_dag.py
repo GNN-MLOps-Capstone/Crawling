@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 
-from pipelines.ingestion.stock_crawler import update_stock_details
+from modules.ingestion.stock_crawler import update_stock_details
 
 default_args = {
     'owner': 'airflow',
