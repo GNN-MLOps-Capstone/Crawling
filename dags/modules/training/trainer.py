@@ -153,3 +153,4 @@ def run_training_pipeline(trainset_path, output_path, aws_info, epochs=50):
         if os.path.exists(local_emb_path): os.remove(local_emb_path)
 
         print(f"✅ Done. All artifacts saved to s3://gold/{output_path}", flush=True)
+        

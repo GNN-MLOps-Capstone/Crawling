@@ -10,6 +10,7 @@ def run_news_crawler():
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     import time
     from datetime import datetime
+    import hashlib
 
     logger = logging.getLogger(__name__)
 

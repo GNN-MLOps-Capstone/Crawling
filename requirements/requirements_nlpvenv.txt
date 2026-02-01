@@ -6,3 +6,5 @@ boto3==1.41.0
 ollama==0.6.1
 tqdm==4.67.1
 psycopg2-binary==2.9.11
+s3fs
+google-genai

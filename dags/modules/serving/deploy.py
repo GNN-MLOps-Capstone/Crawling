@@ -38,7 +38,11 @@ def run_deploy(artifact_info, aws_info, db_info):
     insert_query = """
                    INSERT INTO public.test_service_embeddings
                        (entity_id, entity_type, display_name, gnn_embedding, model_version)
-                   VALUES %s \
+                   VALUES %s ON CONFLICT (entity_id, entity_type)
+        DO \
+                   UPDATE SET
+                       model_version = EXCLUDED.model_version, \
+                       created_at = CURRENT_TIMESTAMP; \
                    """
 
     data_to_insert = []

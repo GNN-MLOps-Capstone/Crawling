@@ -1,18 +1,17 @@
 import pandas as pd
-from airflow.providers.postgres.hooks.postgres import PostgresHook
+import psycopg2
 
 
-def read_daily_news(target_date: str, conn_id: str) -> pd.DataFrame:
+def read_daily_news(target_date: str, db_info: dict) -> pd.DataFrame:
     """
-    [Source: Postgres]
-    지정된 날짜(created_at)의 뉴스 데이터를 조회하여 DataFrame으로 반환합니다.
+    [Source: Postgres] 순수 psycopg2 사용 (Airflow 의존성 제거)
     """
-    pg_hook = PostgresHook(postgres_conn_id=conn_id)
+    conn_str = f"host={db_info['host']} port={db_info['port']} dbname={db_info['dbname']} user={db_info['user']} password={db_info['password']}"
 
+    # KST 기준 하루 범위 설정
     search_start = f"{target_date} 00:00:00"
     search_end = f"{target_date} 23:59:59"
 
-    # 필요한 컬럼만 명시적으로 조회
     query = f"""
         SELECT 
             cn.news_id, 
@@ -25,12 +24,14 @@ def read_daily_news(target_date: str, conn_id: str) -> pd.DataFrame:
     """
 
     try:
-        df = pg_hook.get_pandas_df(query)
+        with psycopg2.connect(conn_str) as conn:
+            df = pd.read_sql(query, conn)
+
         if df.empty:
             print(f"⚠️ [Reader] No data found for date: {target_date}")
             return pd.DataFrame()
 
-        print(f"✅ [Reader] Fetched {len(df)} rows from DB.")
+        print(f"✅ [Reader] Fetched {len(df)} rows for {target_date}")
         return df
 
     except Exception as e:
