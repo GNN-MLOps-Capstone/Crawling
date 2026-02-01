@@ -73,7 +73,10 @@ x-airflow-common:
     AIRFLOW_CONN_NEWS_DATA_DB: "postgresql://${DATA_POSTGRES_USER}:${DATA_POSTGRES_PASSWORD}@news-database:5432/${DATA_POSTGRES_DB_NAME}"
     AIRFLOW_CONN_NAVER_API: "generic://?__extra__=%7B%22naver_client_id%22%3A%22${NAVER_CLIENT_ID}%22%2C%22naver_client_secret%22%3A%22${NAVER_CLIENT_SECRET}%22%7D"
     AIRFLOW_CONN_MINIO_S3: "aws://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@?endpoint_url=http%3A%2F%2Fminio%3A9000"
-
+    AIRFLOW__METRICS__STATSD_ON: 'true'
+    AIRFLOW__METRICS__STATSD_HOST: 'airflow-statsd-exporter'
+    AIRFLOW__METRICS__STATSD_PORT: '8125'
+    AIRFLOW__METRICS__STATSD_PREFIX: 'airflow'
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -81,6 +84,8 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - /var/run/docker.sock:/var/run/docker.sock
   user: "${AIRFLOW_UID:-50000}:0"
+  group_add:
+    - "988"
   depends_on:
     &airflow-common-depends-on
     redis:
@@ -330,33 +335,42 @@ services:
       - news-network
       - proxy-net
 
-#  prometheus:
-#    user: ${PROMETHEUS_USER_ID}
-#    image: prom/prometheus
-#    volumes:
-#      - ./prometheus-grafana/prometheus/config:/etc/prometheus
-#      - ./prometheus-grafana/prometheus/volume:/prometheus/data
-#    #ports:
-#    #  - 9090:9090
-#    command:
-#      - '--web.enable-lifecycle' # API로 설정파일 로드, 서버 종료 가능. 프로덕션 환경에서 비활성화 권장.
-#      - '--config.file=/etc/prometheus/prometheus.yaml'
-#    restart: always
-#    networks:
-#      - news-network
-#      - proxy-net
+  airflow-statsd-exporter:
+    image: prom/statsd-exporter
+    container_name: airflow-statsd-exporter
+    command: "--statsd.listen-udp=:8125 --web.listen-address=:9102"
+    ports:
+      - "9102:9102"
+    networks:
+      - news-network
 
-#  grafana:
-#    user: ${GRAFANA_USER_ID}
-#    image: grafana/grafana
-#    volumes:
-#      - ./prometheus-grafana/grafana/volume:/var/lib/grafana
-#    #ports:
-#    #  - 3000:3000
-#    restart: always
-#    networks:
-#      - news-network
-#      - proxy-net
+  prometheus:
+    image: prom/prometheus
+    user: "0:0" # 권한 문제 방지 (필요 시 수정)
+    volumes:
+      - ./prometheus-grafana/prometheus/config:/etc/prometheus
+      - ./prometheus-grafana/prometheus/volume:/prometheus/data
+    command:
+      - '--web.enable-lifecycle'
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+    ports:
+      - "9090:9090" # 웹 UI 접속용 포트 오픈 권장
+    restart: always
+    networks:
+      - news-network
+      - proxy-net
+
+  grafana:
+    image: grafana/grafana
+    user: "0:0" # 권한 문제 방지
+    volumes:
+      - ./prometheus-grafana/grafana/volume:/var/lib/grafana
+    ports:
+      - "3000:3000" # 웹 UI 접속용 포트 오픈 권장
+    restart: always
+    networks:
+      - news-network
+      - proxy-net
 
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
@@ -481,6 +495,8 @@ services:
     networks:
       - news-network
     restart: always
+
+
 
 networks:
   news-network:
