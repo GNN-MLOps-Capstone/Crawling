@@ -1,0 +1,13 @@
+{
+  "model": {
+    "hidden_dim": 64,
+    "out_dim": 32,
+    "dropout": 0.5
+  },
+  "training": {
+    "lr": 0.01,
+    "epochs": 50,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1
+  }
+}

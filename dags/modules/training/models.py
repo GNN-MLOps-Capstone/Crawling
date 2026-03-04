@@ -3,13 +3,9 @@ from torch_geometric.nn import SAGEConv, HeteroConv
 
 
 class GNNEncoder(torch.nn.Module):
-    # 🟢 [수정] 인자 변경: num_keywords/stocks (개수) -> keyword/stock_feat_dim (벡터 차원 크기)
     def __init__(self, hidden_dim, out_dim, news_feat_dim, keyword_feat_dim, stock_feat_dim):
         super().__init__()
 
-        # 🟢 [수정] Embedding -> Linear 변경
-        # 기존: ID를 받아 벡터로 변환 (학습)
-        # 변경: 이미 있는 벡터를 받아 차원만 변환 (Projection)
         self.news_lin = torch.nn.Linear(news_feat_dim, hidden_dim)
         self.keyword_lin = torch.nn.Linear(keyword_feat_dim, hidden_dim)
         self.stock_lin = torch.nn.Linear(stock_feat_dim, hidden_dim)
@@ -30,7 +26,6 @@ class GNNEncoder(torch.nn.Module):
         }, aggr='sum')
 
     def forward(self, x_dict, edge_index_dict):
-        # 🟢 [수정] Linear Layer 적용
         x_dict_out = {
             'news': self.news_lin(x_dict['news']).relu(),
             'keyword': self.keyword_lin(x_dict['keyword']).relu(),
@@ -59,7 +54,6 @@ class EdgeDecoder(torch.nn.Module):
 
 
 class Model(torch.nn.Module):
-    # 🟢 [수정] 인자 이름 변경
     def __init__(self, hidden_dim, out_dim, news_feat_dim, keyword_feat_dim, stock_feat_dim):
         super().__init__()
         self.encoder = GNNEncoder(hidden_dim, out_dim, news_feat_dim, keyword_feat_dim, stock_feat_dim)
