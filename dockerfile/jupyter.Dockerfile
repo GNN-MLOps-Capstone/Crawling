@@ -7,7 +7,16 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
     curl \
     git \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js 20 설치
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
+
+# Codex CLI 설치
+RUN npm install -g @openai/codex
 
 # Python 3.13 설치
 RUN add-apt-repository ppa:deadsnakes/ppa -y && \
@@ -22,28 +31,30 @@ RUN ln -sf /usr/bin/python3.13 /usr/bin/python3 && \
 RUN python -m ensurepip --upgrade && \
     python -m pip install --upgrade pip
 
+
 # PyTorch 설치
-RUN pip install --no-cache-dir \
+RUN python -m pip install --no-cache-dir \
     torch==2.8.0 \
     torchvision==0.23.0 \
     torchaudio==2.8.0 \
     --index-url https://download.pytorch.org/whl/cu128
 
 # PyG 의존성 설치
-RUN pip install --no-cache-dir \
+RUN python -m pip install --no-cache-dir \
     pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
     -f https://data.pyg.org/whl/torch-2.8.0+cu128.html
 
 # PyG 메인 라이브러리 설치
-RUN pip install --no-cache-dir torch_geometric
+RUN python -m pip install --no-cache-dir torch_geometric
 
 # 제약 조건 파일 생성
 RUN echo "torch==2.8.0" > /tmp/constraints.txt
 
 # Jupyter 및 필수 라이브러리 설치
-RUN pip install --no-cache-dir jupyterlab notebook
-COPY requirements_jupyter.txt /tmp/requirements_jupyter.txt
-RUN pip install --no-cache-dir --ignore-installed \
+RUN python -m pip install --no-cache-dir jupyterlab notebook
+COPY /requirements/requirements_jupyter.txt /tmp/requirements_jupyter.txt
+
+RUN python -m pip install --no-cache-dir --ignore-installed \
     -r /tmp/requirements_jupyter.txt \
     -c /tmp/constraints.txt
 

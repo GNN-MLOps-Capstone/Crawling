@@ -85,19 +85,24 @@ CREATE TABLE filtered_news (
     filtered_news_id BIGSERIAL PRIMARY KEY,
     news_id BIGINT UNIQUE NOT NULL,
     crawled_news_id BIGINT NOT NULL,
-    
+
+    refined_text text,                  -- 정제된 본문
+    news_embedding vector,              -- 차원 미지정 (유연한 실험용)
+    embedding_model_version varchar(50), -- 사용된 모델 정보
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    CONSTRAINT fk_filtered_news_id FOREIGN KEY (news_id) 
+
+    CONSTRAINT fk_filtered_news_id FOREIGN KEY (news_id)
         REFERENCES naver_news(news_id) ON DELETE CASCADE,
-    CONSTRAINT fk_filtered_crawled_id FOREIGN KEY (crawled_news_id) 
+    CONSTRAINT fk_filtered_crawled_id FOREIGN KEY (crawled_news_id)
         REFERENCES crawled_news(crawled_news_id) ON DELETE CASCADE
 );
 
-
-CREATE TRIGGER update_filtered_news_updated_at BEFORE UPDATE ON filtered_news
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+-- 트리거 설정: updated_at 자동 갱신
+CREATE TRIGGER update_filtered_news_updated_at
+BEFORE UPDATE ON filtered_news
+FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 
 -- 최종 필터링된 뉴스를 조회하기 쉽게 뷰 생성

@@ -28,3 +28,10 @@ logs/
 notebooks/
 
 *.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local runtime/model artifacts
+ollama/

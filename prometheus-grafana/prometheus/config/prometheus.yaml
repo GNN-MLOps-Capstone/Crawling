@@ -1,35 +1,15 @@
-# 요청 주기 설정
 global:
-  scrape_interval: 15s
-  scrape_timeout: 15s
-  evaluation_interval: 2m
-  external_labels:
-    monitor: "codelab-monitor"
-  query_log_file: query_log_file.log
+  scrape_interval: 15s      # 15초마다 데이터 수집
+  evaluation_interval: 15s  # 규칙 평가 주기 (알람 설정 시 사용)
 
-rule_files:
-  - "rules.yaml"
-
-# 수집 대상 설정
 scrape_configs:
-  - job_name: "prometheus"
-    scrape_interval: 10s
-    scrape_timeout: 10s
-    metrics_path: /metrics
-    honor_labels: false
-    honor_timestamps: false
-    scheme: http
+  # 1. Prometheus 자체 모니터링 (자기 자신 상태 확인)
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ["prometheus_container:9090"]
-        labels:
-          service: prometheus-1
+      - targets: ['localhost:9090']
 
-  - job_name: "airflow"
+  # 2. Airflow 메트릭 수집 (StatsD Exporter 경유)
+  # docker-compose에 추가한 서비스 이름인 'airflow-statsd-exporter'를 바라봅니다.
+  - job_name: 'airflow-statsd'
     static_configs:
-      - targets: ["airflow_container:8080"]
-        labels:
-          service: airflow-1
-
-  - job_name: "node"
-    static_configs:
-      - targets: ["prometheus_container:9100"]
+      - targets: ['airflow-statsd-exporter:9102']
