@@ -5,12 +5,13 @@ import yaml
 import boto3
 import pandas as pd
 import sys  # [추가] 로그 강제 출력을 위해 필요
+import psycopg2
 from google import genai
 from google.genai import types
 
 
 class GeminiNewsAnalyzer:
-    def __init__(self, aws_info: dict, config_path: str, stock_map: dict):
+    def __init__(self, aws_info: dict, config_path: str, stock_map: dict, db_info: dict = None):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
@@ -24,11 +25,85 @@ class GeminiNewsAnalyzer:
         self.stock_map = stock_map
         self.client = genai.Client(api_key=aws_info.get('gemini_api_key'))
         self.model_name = self.config['gemini']['model_name']
+        self.db_info = db_info
+        self.filter_version = self.config.get('pipeline', {}).get('filter_version', 'analysis_integration_v2')
         self.gen_config = types.GenerateContentConfig(
             temperature=self.config['gemini']['temperature'],
             system_instruction=self.config['gemini']['system_prompt'],
             response_mime_type="application/json"
         )
+
+    def _bulk_update_filter_status(self, news_ids, status, reason):
+        if not self.db_info or not news_ids:
+            return
+
+        sql = """
+            UPDATE public.crawled_news
+            SET filter_status = %s::filter_status_enum,
+                filter_version = %s,
+                filtered_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP,
+                filter_reason = %s
+            WHERE news_id = ANY(%s)
+        """
+        ids = sorted({int(nid) for nid in news_ids})
+        with psycopg2.connect(**self.db_info) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (status, self.filter_version, reason, ids))
+            conn.commit()
+
+    def _extract_valid_analysis(self, res: dict):
+        if not isinstance(res, dict):
+            return None, None
+
+        summary = res.get('summary')
+        sentiment = res.get('sentiment')
+
+        if isinstance(summary, str):
+            summary = summary.strip()
+        else:
+            summary = ''
+
+        if isinstance(sentiment, str):
+            sentiment = sentiment.strip()
+        else:
+            sentiment = ''
+
+        if sentiment not in {'긍정', '중립', '부정'}:
+            sentiment = ''
+        if not summary:
+            summary = ''
+
+        return summary, sentiment
+
+    def _analyze_with_retry(self, text: str):
+        max_validation_retries = self.config['gemini'].get('validation_retries', 2)
+        total_attempts = max(1, max_validation_retries + 1)
+        last_res = None
+        had_response = False
+
+        for attempt in range(total_attempts):
+            res = self._call_gemini(text)
+            if not res:
+                continue
+            last_res = res
+            had_response = True
+
+            summary, sentiment = self._extract_valid_analysis(res)
+            if summary and sentiment:
+                return res, summary, sentiment, None, None
+
+            if attempt < total_attempts - 1:
+                print(
+                    f"⚠️ Invalid analysis format. Retrying Gemini call ({attempt + 1}/{total_attempts - 1})",
+                    flush=True
+                )
+                time.sleep(1.0)
+
+        fallback_summary = text.strip()[:220] if isinstance(text, str) and text.strip() else '요약 생성 실패'
+        if had_response:
+            return last_res or {}, fallback_summary, '중립', 'failed_permanent', 'invalid_analysis_format'
+        return {}, fallback_summary, '중립', 'failed_retryable', 'gemini_api_no_response'
 
     def _call_gemini(self, text: str):
         max_retries = self.config['gemini']['max_retries']
@@ -95,6 +170,8 @@ class GeminiNewsAnalyzer:
                 continue
 
             stock_data, keyword_data, analysis_data = [], [], []
+            retryable_failed_ids = set()
+            permanent_failed_ids = set()
             total_count = len(df)
 
             # [수정] tqdm 제거하고 주기적 print 사용
@@ -106,8 +183,11 @@ class GeminiNewsAnalyzer:
                 text = row.get('refined_text', '')
                 if not text: continue
 
-                res = self._call_gemini(text)
-                if not res: continue
+                res, summary, sentiment, fail_status, _ = self._analyze_with_retry(text)
+                if fail_status == 'failed_retryable':
+                    retryable_failed_ids.add(int(row['news_id']))
+                elif fail_status == 'failed_permanent':
+                    permanent_failed_ids.add(int(row['news_id']))
 
                 # 1. Stocks
                 valid_stocks = self._validate_stocks(res.get('related_stocks', []))
@@ -125,9 +205,14 @@ class GeminiNewsAnalyzer:
                 # 3. Analysis (Summary, Sentiment)
                 analysis_data.append({
                     'news_id': row['news_id'],
-                    'summary': res.get('summary', ''),
-                    'sentiment': res.get('sentiment', '중립')
+                    'summary': summary,
+                    'sentiment': sentiment
                 })
+
+            if retryable_failed_ids:
+                self._bulk_update_filter_status(retryable_failed_ids, 'failed_retryable', 'gemini_api_no_response')
+            if permanent_failed_ids:
+                self._bulk_update_filter_status(permanent_failed_ids, 'failed_permanent', 'invalid_analysis_format')
 
             print(f"✅ Finished Analysis for {date_str}. Saving...", flush=True)
 
@@ -161,6 +246,6 @@ class GeminiNewsAnalyzer:
 
 
 # Service Wrapper
-def run_gemini_service(updated_dates: list, aws_info: dict, config_path: str, stock_map: dict):
-    analyzer = GeminiNewsAnalyzer(aws_info, config_path, stock_map)
+def run_gemini_service(updated_dates: list, aws_info: dict, config_path: str, stock_map: dict, db_info: dict = None):
+    analyzer = GeminiNewsAnalyzer(aws_info, config_path, stock_map, db_info=db_info)
     return analyzer.process_analysis(updated_dates)

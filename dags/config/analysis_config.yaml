@@ -3,6 +3,9 @@
 aws:
   bucket_name: "silver"
 
+pipeline:
+  filter_version: "analysis_integration_v2"
+
 gemini:
   model_name: "gemini-2.0-flash-lite"
   temperature: 0.3

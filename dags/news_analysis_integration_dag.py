@@ -1,4 +1,3 @@
-import pandas as pd
 import pendulum
 from datetime import datetime, timedelta
 
@@ -6,7 +5,6 @@ from airflow.decorators import dag, task
 from airflow.datasets import Dataset
 from airflow.hooks.base import BaseHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.models.param import Param
 from airflow.models import Variable
 
@@ -79,22 +77,43 @@ def analysis_integration_pipeline():
         return {row['stock_name'].lower(): {'id': row['stock_id'], 'name': row['stock_name']} for _, row in
                 df.iterrows()}
 
+    @task
+    def report_filter_status(dates, stage):
+        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        result = {}
+        sql = """
+            SELECT filter_status::text AS status, COUNT(*) AS cnt
+            FROM public.crawled_news
+            WHERE (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Seoul')::date = %s::date
+            GROUP BY filter_status
+            ORDER BY filter_status::text
+        """
+
+        for date_str in dates:
+            rows = pg_hook.get_records(sql, parameters=(date_str,))
+            status_counts = {status: int(cnt) for status, cnt in rows}
+            result[date_str] = status_counts
+            print(f"[{stage}] {date_str} filter_status counts: {status_counts}", flush=True)
+
+        return result
+
     #2. Refinement
     @task.external_python(python=PYTHON_VENV_PATH, task_id='refinement')
     def task_refine(updated_dates, aws_info, pg_info):
         import sys
         sys.path.append('/opt/airflow/dags')
+        config_file = '/opt/airflow/dags/config/analysis_config.yaml'
         from modules.analysis.news_service import run_refinement_process
-        return run_refinement_process(updated_dates, aws_info, pg_info)
+        return run_refinement_process(updated_dates, aws_info, pg_info, config_file)
 
     # 3. Gemini Analysis (신규 모듈 - 통합 분석)
     @task.external_python(python=PYTHON_VENV_PATH, task_id='gemini_analysis')
-    def task_gemini(updated_dates, aws_info, stock_map):
+    def task_gemini(updated_dates, aws_info, stock_map, pg_info):
         import sys
         sys.path.append('/opt/airflow/dags')
         config_file = '/opt/airflow/dags/config/analysis_config.yaml'
         from modules.analysis.gemini_service import run_gemini_service
-        return run_gemini_service(updated_dates, aws_info, config_file, stock_map)
+        return run_gemini_service(updated_dates, aws_info, config_file, stock_map, pg_info)
 
     # 4. Keyword Snapshot (기존 모듈 유지)
     @task.external_python(python=PYTHON_VENV_PATH, task_id='keyword_snapshot')
@@ -135,11 +154,13 @@ def analysis_integration_pipeline():
     ctx = prepare_context()
     pg_info = prepare_db_context()
     mapping = get_stock_mapping()
+    status_before = report_filter_status(ctx['dates'], 'before')
 
     # Refinement (Ollama Embedding) -> Gemini Analysis (Extraction)
     refined = task_refine(ctx['dates'], ctx['aws'], pg_info)
-    analyzed = task_gemini(ctx['dates'], ctx['aws'], mapping)
+    analyzed = task_gemini(ctx['dates'], ctx['aws'], mapping, pg_info)
 
+    status_before >> refined
     refined >> analyzed
 
     # Snapshot은 Keyword가 추출된 후 실행
@@ -147,7 +168,9 @@ def analysis_integration_pipeline():
     analyzed >> snapshot
 
     # Loading은 모든 분석 및 스냅샷 완료 후
-    task_load(ctx['dates'], ctx['aws'], snapshot, pg_info)
+    loaded = task_load(ctx['dates'], ctx['aws'], snapshot, pg_info)
+    status_after = report_filter_status(ctx['dates'], 'after')
+    loaded >> status_after
 
 
 dag_instance = analysis_integration_pipeline()
