@@ -7,7 +7,16 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
     curl \
     git \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js 20 설치
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
+
+# Codex CLI 설치
+RUN npm install -g @openai/codex
 
 # Python 3.13 설치
 RUN add-apt-repository ppa:deadsnakes/ppa -y && \

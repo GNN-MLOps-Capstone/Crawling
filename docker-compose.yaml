@@ -440,6 +440,8 @@ services:
     build:
       context: .
       dockerfile: dockerfile/jupyter.Dockerfile
+    stdin_open: true
+    tty: true
     #ports:
     #  - "8888:8888"
     expose:
@@ -460,6 +462,7 @@ services:
       - RESTARTABLE=yes
     volumes:
       - ./notebooks:/home/jovyan/work
+      - codex-home:/root/.codex
     depends_on:
       - news-database
       - minio
@@ -511,3 +514,4 @@ volumes:
   prometheus-volume:
   grafana-volume:
   minio_data:
+  codex-home:
