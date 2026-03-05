@@ -35,3 +35,6 @@ __pycache__/
 
 # Local runtime/model artifacts
 ollama/
+
+# Local DB backups
+backups/
