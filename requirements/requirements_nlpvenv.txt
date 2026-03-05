@@ -6,5 +6,9 @@ boto3==1.41.0
 ollama==0.6.1
 tqdm==4.67.1
 psycopg2-binary==2.9.11
+requests==2.32.5
+beautifulsoup4==4.14.2
+newspaper3k==0.2.8
+lxml[html_clean]==6.0.2
 s3fs
 google-genai

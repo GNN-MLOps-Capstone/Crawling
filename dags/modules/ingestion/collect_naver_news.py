@@ -1,37 +1,37 @@
 # collect_naver_news.py
 
 
-def run_collect_naver_news():
+def run_collect_naver_news(db_config, api_config, query='다', total=1000):
     import requests
     import psycopg2
     import logging
-    from airflow.providers.postgres.hooks.postgres import PostgresHook
-    from airflow.hooks.base import BaseHook
     from datetime import datetime
     import re
     from email.utils import parsedate_to_datetime
     import time
 
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s - %(message)s')
+    root_logger.setLevel(logging.INFO)
     logger = logging.getLogger(__name__)
 
     class NaverNewsCollector:
         def __init__(self):
-            pg_hook = PostgresHook(postgres_conn_id='news_data_db')
-            conn_obj = pg_hook.get_connection(conn_id='news_data_db')
-
-            api_conn_obj = BaseHook.get_connection(conn_id='naver_api')
-
-            self.client_id = api_conn_obj.extra_dejson.get('naver_client_id')
-            self.client_secret = api_conn_obj.extra_dejson.get('naver_client_secret')
+            self.client_id = api_config.get('client_id')
+            self.client_secret = api_config.get('client_secret')
             self.api_url = "https://openapi.naver.com/v1/search/news.json"
+
+            if not self.client_id or not self.client_secret:
+                raise ValueError("Naver API credentials are required.")
 
             try:
                 self.conn = psycopg2.connect(
-                    host=conn_obj.host,
-                    port=conn_obj.port,
-                    database=conn_obj.schema,
-                    user=conn_obj.login,
-                    password=conn_obj.get_password()
+                    host=db_config.get('host'),
+                    port=db_config.get('port'),
+                    database=db_config.get('dbname'),
+                    user=db_config.get('user'),
+                    password=db_config.get('password')
                 )
             except psycopg2.OperationalError as e:
                 logger.error(f"데이터베이스 연결 실패: {e}")
@@ -165,11 +165,12 @@ def run_collect_naver_news():
 
     try:
         collector = NaverNewsCollector()
-        collector.collect(query='다', total=1000)
+        inserted_total = collector.collect(query=query, total=total)
+        return inserted_total
     except Exception as e:
         logger.error(f"수집 중 오류: {e}")
         raise
 
 
 if __name__ == "__main__":
-    run_collect_naver_news()
+    raise RuntimeError("run_collect_naver_news requires db_config and api_config arguments.")

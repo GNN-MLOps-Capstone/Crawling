@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 import pendulum
+from airflow.decorators import task
+from airflow.hooks.base import BaseHook
 from airflow.models.dag import DAG
-from airflow.operators.python import PythonVirtualenvOperator
 
-# 실행 함수 import
-from modules.ingestion.collect_naver_news import run_collect_naver_news
-from modules.ingestion.news_crawler import run_news_crawler
-
-# def run_collect_naver_news():
-#     print("API 스크립트 실행 (실제 모듈을 찾을 수 없음)")
-# def run_news_crawler():
-#     print("크롤러 스크립트 실행 (실제 모듈을 찾을 수 없음)")
+PYTHON_VENV_PATH = '/opt/airflow/venv_nlp/bin/python'
 
 # DAG 정의
 with DAG(
@@ -25,26 +19,55 @@ with DAG(
     - second step: 수집된 URL을 기반으로 도메인 기준 필터링을 하고, 크롤링을 하여 PostgreSQL에 저장합니다.
     - 이후 추가 예정
     """,
-        tags=["news", "ingestion", "filtering", "crawling"],
+        tags=["news", "ingestion", "filtering", "crawling", "external_python"],
 ) as dag:
-    # Task 정의
-    collect_naver_news = PythonVirtualenvOperator(
-        task_id="collect_naver_news",
-        requirements=["requests", "psycopg2-binary"],
-        venv_cache_path="venv_cache",
-        python_callable=run_collect_naver_news,
-    )
+    @task
+    def prepare_ingestion_context():
+        pg_conn = BaseHook.get_connection('news_data_db')
+        api_conn = BaseHook.get_connection('naver_api')
 
-    news_crawler = PythonVirtualenvOperator(
-        task_id="news_crawler",
-        requirements=["psycopg2-binary",
-                      "newspaper3k==0.2.8",
-                      "requests",
-                      "beautifulsoup4==4.14.2",
-                      "lxml[html_clean]==6.0.2"],
-        venv_cache_path="venv_cache",
-        python_callable=run_news_crawler,
-    )
+        db_config = {
+            "host": pg_conn.host,
+            "port": pg_conn.port,
+            "user": pg_conn.login,
+            "password": pg_conn.password,
+            "dbname": pg_conn.schema,
+        }
+        api_config = {
+            "client_id": api_conn.extra_dejson.get('naver_client_id'),
+            "client_secret": api_conn.extra_dejson.get('naver_client_secret'),
+        }
+        return {
+            "db": db_config,
+            "api": api_config,
+            "filter_file_path": "/opt/airflow/dags/modules/ingestion/filter_domain_list_v1.00.txt",
+        }
 
-    # Task 의존성 설정
-    collect_naver_news >> news_crawler
+    @task.external_python(python=PYTHON_VENV_PATH, task_id="collect_naver_news")
+    def collect_naver_news(context):
+        import sys
+        sys.path.append('/opt/airflow/dags')
+        from modules.ingestion.collect_naver_news import run_collect_naver_news
+        return run_collect_naver_news(
+            db_config=context["db"],
+            api_config=context["api"],
+            query='다',
+            total=1000,
+        )
+
+    @task.external_python(python=PYTHON_VENV_PATH, task_id="news_crawler")
+    def news_crawler(context):
+        import sys
+        sys.path.append('/opt/airflow/dags')
+        from modules.ingestion.news_crawler import run_news_crawler
+        return run_news_crawler(
+            db_config=context["db"],
+            filter_file_path=context["filter_file_path"],
+            crawler_version='0.02',
+            max_workers=4,
+        )
+
+    context = prepare_ingestion_context()
+    collect_task = collect_naver_news(context)
+    crawl_task = news_crawler(context)
+    collect_task >> crawl_task

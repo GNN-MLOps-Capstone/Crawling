@@ -1,4 +1,4 @@
-def run_news_crawler():
+def run_news_crawler(db_config, filter_file_path, crawler_version='0.02', max_workers=4):
     import psycopg2
     from psycopg2 import pool
     from urllib.parse import urlparse
@@ -7,11 +7,13 @@ def run_news_crawler():
     import requests
     from bs4 import BeautifulSoup
     import logging
-    from airflow.providers.postgres.hooks.postgres import PostgresHook
     import time
     from datetime import datetime
-    import hashlib
 
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s - %(message)s')
+    root_logger.setLevel(logging.INFO)
     logger = logging.getLogger(__name__)
 
     class NewsCrawler:
@@ -23,17 +25,14 @@ def run_news_crawler():
             self.filtered_domains = self._load_filter_domains()
             self.max_workers = max_workers
             try:
-                pg_hook = PostgresHook(postgres_conn_id='news_data_db')
-                conn_obj = pg_hook.get_connection(conn_id='news_data_db')
-
                 self.db_pool = pool.SimpleConnectionPool(
                     minconn=1,
                     maxconn=max_workers + 5,
-                    host=conn_obj.host,
-                    port=conn_obj.port,
-                    database=conn_obj.schema,
-                    user=conn_obj.login,
-                    password=conn_obj.get_password()
+                    host=db_config.get('host'),
+                    port=db_config.get('port'),
+                    database=db_config.get('dbname'),
+                    user=db_config.get('user'),
+                    password=db_config.get('password')
                 )
                 logger.info(f"데이터베이스 커넥션 풀 생성 완료 (최대 {max_workers + 5}개)")
             except psycopg2.OperationalError as e:
@@ -94,6 +93,103 @@ def run_news_crawler():
                 response_time_ms = int((time.time() - start_time) * 1000)
                 logger.debug(f"[BeautifulSoup] 크롤링 실패 ({url}): {e}")
                 return None, response_time_ms
+
+        def _normalize_title(self, text):
+            if not text:
+                return ''
+            return ' '.join(str(text).split()).strip()
+
+        def _is_truncated_title(self, title):
+            normalized = self._normalize_title(title)
+            return normalized.endswith('...') or normalized.endswith('…')
+
+        def _extract_title_from_meta(self, url):
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            candidates = []
+            og = soup.select_one("meta[property='og:title']")
+            if og and og.get('content'):
+                candidates.append(og.get('content'))
+
+            tw = soup.select_one("meta[name='twitter:title']")
+            if tw and tw.get('content'):
+                candidates.append(tw.get('content'))
+
+            naver_title = soup.select_one('h2#title_area span')
+            if naver_title:
+                candidates.append(naver_title.get_text(separator=' ', strip=True))
+
+            if soup.title and soup.title.string:
+                candidates.append(soup.title.string)
+
+            for candidate in candidates:
+                cleaned = self._normalize_title(candidate)
+                if cleaned:
+                    return cleaned
+            return ''
+
+        def _extract_full_title(self, url):
+            if 'n.news.naver.com' in url:
+                try:
+                    title = self._extract_title_from_meta(url)
+                    if title:
+                        return title
+                except Exception:
+                    return ''
+
+            try:
+                config = Config()
+                config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+                config.request_timeout = 10
+                article = Article(url, config=config, language='ko')
+                article.download()
+                article.parse()
+                title = self._normalize_title(article.title)
+                if title:
+                    return title
+            except Exception:
+                pass
+
+            try:
+                return self._extract_title_from_meta(url)
+            except Exception:
+                return ''
+
+        def _maybe_update_truncated_title(self, cursor, news_id, url, current_title):
+            if not self._is_truncated_title(current_title):
+                return False
+
+            try:
+                new_title = self._extract_full_title(url)
+                old_clean = self._normalize_title(current_title)
+                new_clean = self._normalize_title(new_title)
+                if not new_clean or new_clean == old_clean or self._is_truncated_title(new_clean):
+                    return False
+
+                old_without_ellipsis = old_clean.rstrip('.…').strip()
+                if len(new_clean) < len(old_without_ellipsis):
+                    return False
+
+                cursor.execute(
+                    """
+                    UPDATE naver_news
+                    SET title = %s
+                    WHERE news_id = %s AND title = %s
+                    """,
+                    (new_clean, news_id, current_title),
+                )
+                if cursor.rowcount > 0:
+                    logger.info(f"  ↳ title 보정 완료: news_id={news_id}")
+                    return True
+                return False
+            except Exception as e:
+                logger.debug(f"title 보정 실패 (news_id={news_id}): {e}")
+                return False
 
         def close_pool(self):
             if self.db_pool:
@@ -171,6 +267,7 @@ def run_news_crawler():
                     (news_id,))
                 conn.commit()
                 logger.info(f"[{idx}/{total}] {title[:50]}...")
+                title_updated = self._maybe_update_truncated_title(cursor, news_id, url, title)
                 text, response_time_ms = self.crawl_article(url)  # -> 이 함수가 내부적으로 분기 처리
                 if text:
                     try:
@@ -181,23 +278,23 @@ def run_news_crawler():
                                        (news_id,))
                         conn.commit()
                         logger.info(f"  ✓ 성공 ({len(text):,}자, {response_time_ms}ms)")
-                        return 'success'
+                        return {'status': 'success', 'title_updated': title_updated}
                     except psycopg2.IntegrityError:
                         conn.rollback()
                         cursor.execute("UPDATE naver_news SET crawl_status = 'crawl_success' WHERE news_id = %s",
                                        (news_id,))
                         conn.commit()
                         logger.warning(f"  ⚠ 이미 크롤링됨")
-                        return 'success'
+                        return {'status': 'success', 'title_updated': title_updated}
                 else:
                     cursor.execute("UPDATE naver_news SET crawl_status = 'crawl_failed' WHERE news_id = %s", (news_id,))
                     conn.commit()
                     logger.warning(f"  ✗ 실패: 본문 없음")
-                    return 'failed'
+                    return {'status': 'failed', 'title_updated': title_updated}
             except Exception as e:
                 conn.rollback()
                 logger.error(f"  ✗ 오류: {e}")
-                return 'failed'
+                return {'status': 'failed', 'title_updated': False}
             finally:
                 cursor.close()
                 self._release_db_connection(conn)
@@ -211,21 +308,25 @@ def run_news_crawler():
                 news_list = cursor.fetchall()
                 if not news_list:
                     logger.info("크롤링할 데이터가 없습니다.")
-                    return 0, 0
+                    return 0, 0, 0
                 total = len(news_list)
                 logger.info(f"크롤링 시작: {total:,}개 (스레드: {self.max_workers}개)")
-                success_count, failed_count = 0, 0
+                success_count, failed_count, title_updated_count = 0, 0, 0
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     future_to_news = {executor.submit(self._process_single_news, news_data, idx, total): news_data for
                                       idx, news_data in enumerate(news_list, 1)}
                     for future in as_completed(future_to_news):
                         result = future.result()
-                        if result == 'success':
+                        if result.get('status') == 'success':
                             success_count += 1
                         else:
                             failed_count += 1
-                logger.info(f"크롤링 완료 - 성공: {success_count:,}개, 실패: {failed_count:,}개")
-                return success_count, failed_count
+                        if result.get('title_updated'):
+                            title_updated_count += 1
+                logger.info(
+                    f"크롤링 완료 - 성공: {success_count:,}개, 실패: {failed_count:,}개, title 보정: {title_updated_count:,}개"
+                )
+                return success_count, failed_count, title_updated_count
             except Exception as e:
                 logger.error(f"크롤링 중 오류: {e}")
                 raise
@@ -242,23 +343,32 @@ def run_news_crawler():
             logger.info("\n[1단계] URL 필터링")
             filtered_count = self.filter_urls()
             logger.info("\n[2단계] 뉴스 크롤링")
-            success_count, failed_count = self.crawl_news()
+            success_count, failed_count, title_updated_count = self.crawl_news()
             elapsed_time = time.time() - start_time
             logger.info("\n" + "=" * 60)
-            logger.info(f"완료 - 필터링: {filtered_count:,}, 성공: {success_count:,}, 실패: {failed_count:,}")
+            logger.info(
+                f"완료 - 필터링: {filtered_count:,}, 성공: {success_count:,}, 실패: {failed_count:,}, title 보정: {title_updated_count:,}"
+            )
             logger.info(f"총 실행 시간: {elapsed_time:.2f}초")
             if (success_count + failed_count) > 0:
                 logger.info(f"평균 처리 시간: {elapsed_time / (success_count + failed_count):.2f}초/건")
             logger.info("=" * 60)
+            return {
+                "filtered_count": filtered_count,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "title_updated_count": title_updated_count,
+                "elapsed_time_sec": round(elapsed_time, 2),
+            }
 
     crawler = None
     try:
         crawler = NewsCrawler(
-            filter_file_path='/opt/airflow/dags/modules/ingestion/filter_domain_list_v1.00.txt',
-            crawler_version='0.02',  # Hybrid 버전
-            max_workers=4
+            filter_file_path=filter_file_path,
+            crawler_version=crawler_version,
+            max_workers=max_workers
         )
-        crawler.run()
+        return crawler.run()
     except Exception as e:
         logger.error(f"크롤러 실행 중 심각한 오류 발생: {e}")
     finally:
@@ -266,4 +376,4 @@ def run_news_crawler():
             crawler.close_pool()
 
 if __name__ == "__main__":
-    run_news_crawler()
+    raise RuntimeError("run_news_crawler requires db_config and filter_file_path arguments.")
