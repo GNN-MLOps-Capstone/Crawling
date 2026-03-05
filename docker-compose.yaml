@@ -499,6 +499,42 @@ services:
       - news-network
     restart: always
 
+  recommend-api:
+    build:
+      context: .
+      dockerfile: dockerfile/recommend-api.Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    expose:
+      - 8000
+    ports:
+      - "18000:8000"
+    environment:
+      RECO_MODEL_VERSION: v1
+      RECO_CACHE_TTL_SEC: 600
+      NEWS_DB_HOST: news-database
+      NEWS_DB_PORT: 5432
+      NEWS_DB_NAME: ${DATA_POSTGRES_DB_NAME}
+      NEWS_DB_USER: ${DATA_POSTGRES_USER}
+      NEWS_DB_PASSWORD: ${DATA_POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      news-database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8000/healthz" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: always
+    networks:
+      - news-network
+      - proxy-net
+
 
 
 networks:
