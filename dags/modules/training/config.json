@@ -2,12 +2,42 @@
   "model": {
     "hidden_dim": 64,
     "out_dim": 32,
-    "dropout": 0.5
+    "heads": 4,             
+    "dropout": 0.3,         
+    "dropout_lin": 0.4      
   },
   "training": {
-    "lr": 0.01,
-    "epochs": 50,
-    "val_ratio": 0.1,
-    "test_ratio": 0.1
+    "lr": 0.001,
+    "epochs": 300,
+    "batch_size": 4096,     
+    "temperature": 0.1,     
+    "loss_mode": "weighted_infonce",
+    "weighting": "log1p",
+    "min_train_cooccur": 1,
+    "enable_low_cooccur_filter": false,
+    "seed": 42,
+    "val_ratio": 0.2,
+    "test_ratio": 0.2,
+    "eval_k": 10,
+    "selection_metric": "val_mrr",
+    "selection_mode": "max",
+    "metric_schema": "v2",
+    "implicit_eval_seed": 42,
+    "implicit_sample_limit": 500
+  },
+  "data_processing": {
+    "min_freq_keyword": 10,  
+    "min_freq_stock": 10,    
+    "min_pmi": 1.0,         
+    "min_cooccur": 10       
+  },
+  "mlflow": {
+    "experiment_name": "News_GNN_v1",
+    "tags": {
+      "status": "experiment",
+      "model_type": "GNN_3layer+GAT",
+      "producer": "jupyter_notebook",
+      "description": "GlobalPMI+InfoNCE+Sim0.4"
+    }
   }
 }

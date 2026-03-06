@@ -37,8 +37,7 @@ default_args = {
         "train_date": Param(
             default=datetime.now(local_tz).strftime('%Y-%m-%d'),
             type="string", format="date", description="학습할 데이터 날짜"
-        ),
-        "epochs": Param(default=50, type="integer", description="학습 Epoch 수 (Override)")
+        )
     },
     tags=['gold', 'gnn', 'training']
 )
@@ -72,10 +71,6 @@ def training_pipeline():
             with open(config_path, 'r') as f:
                 file_config = json.load(f)
                 config.update(file_config)
-
-        # UI 파라미터로 오버라이드
-        if 'epochs' in context['params']:
-            config['training']['epochs'] = context['params']['epochs']
 
         # 3. AWS 정보
         connection = BaseHook.get_connection(MINIO_CONN_ID)
