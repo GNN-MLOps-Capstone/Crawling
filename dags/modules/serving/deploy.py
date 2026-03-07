@@ -1,30 +1,74 @@
 import os
-import json
 import pickle
-import s3fs
-import numpy as np
 import psycopg2
+import mlflow
+from mlflow.tracking import MlflowClient
 from psycopg2.extras import execute_values
 
 
 def run_deploy(artifact_info, aws_info, db_info):
-    print(f"🚀 [Serving] Deploying Version: {artifact_info['version']}")
+    # MLflow artifact store(MinIO) 접근에 필요한 환경변수 설정
+    os.environ['AWS_ACCESS_KEY_ID'] = aws_info['access_key']
+    os.environ['AWS_SECRET_ACCESS_KEY'] = aws_info['secret_key']
+    os.environ['MLFLOW_S3_ENDPOINT_URL'] = aws_info['endpoint_url']
+    os.environ['AWS_DEFAULT_REGION'] = 'us-east-1'
 
-    fs = s3fs.S3FileSystem(
-        key=aws_info['access_key'],
-        secret=aws_info['secret_key'],
-        client_kwargs={'endpoint_url': aws_info['endpoint_url']}
+    experiment_name = artifact_info["experiment_name"]
+    target_status = artifact_info["status"]
+    candidate_version = artifact_info.get("candidate_version", "")
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+
+    print(
+        f"🔎 [Serving] Resolving model from MLflow experiment={experiment_name}, "
+        f"status={target_status}, candidate_version={candidate_version or 'ANY'}"
     )
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient(tracking_uri=tracking_uri)
+    exp = client.get_experiment_by_name(experiment_name)
+    if exp is None:
+        raise ValueError(f"Experiment not found: {experiment_name}")
+
+    filter_parts = [
+        "attributes.status = 'FINISHED'",
+        f"tags.status = '{target_status}'",
+    ]
+    if candidate_version:
+        filter_parts.append(f"tags.candidate_version = '{candidate_version}'")
+    filter_string = " and ".join(filter_parts)
+
+    runs = client.search_runs(
+        experiment_ids=[exp.experiment_id],
+        filter_string=filter_string,
+        order_by=["attributes.start_time DESC"],
+        max_results=20,
+    )
+    if not runs:
+        raise ValueError(f"No FINISHED run found with tags.status={target_status}")
+
+    selected_run = None
+    emb_local_path = None
+    map_local_path = None
+    for run in runs:
+        run_id = run.info.run_id
+        try:
+            emb_local_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="node_embeddings.pkl")
+            map_local_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="node_mapping.pkl")
+            selected_run = run
+            break
+        except Exception as exc:
+            print(f"⚠️ Skip run {run_id}: missing required artifact(s): {exc}")
+
+    if selected_run is None:
+        raise ValueError("No run has both node_embeddings.pkl and node_mapping.pkl artifacts")
+
+    version = selected_run.data.tags.get("candidate_version") or selected_run.info.run_id
+    print(f"🚀 [Serving] Deploying run_id={selected_run.info.run_id}, version={version}")
 
     # 1. 데이터 로드
-    print(f"📥 Loading Artifacts...")
-
-    emb_path = f"{artifact_info['model_bucket']}/{artifact_info['model_emb_key']}"
-    with fs.open(emb_path, 'rb') as f:
+    print("📥 Loading Artifacts from MLflow...")
+    with open(emb_local_path, 'rb') as f:
         embeddings = pickle.load(f)
-
-    map_path = f"{artifact_info['map_bucket']}/{artifact_info['map_key']}"
-    with fs.open(map_path, 'rb') as f:
+    with open(map_local_path, 'rb') as f:
         full_mappings = pickle.load(f)
 
     # 2. DB 연결
@@ -41,12 +85,13 @@ def run_deploy(artifact_info, aws_info, db_info):
                    VALUES %s ON CONFLICT (entity_id, entity_type)
         DO \
                    UPDATE SET
+                       display_name = EXCLUDED.display_name, \
+                       gnn_embedding = EXCLUDED.gnn_embedding, \
                        model_version = EXCLUDED.model_version, \
                        created_at = CURRENT_TIMESTAMP; \
                    """
 
     data_to_insert = []
-    version = artifact_info['version']
 
     # (1) News
     if 'news' in embeddings and 'news' in full_mappings:
