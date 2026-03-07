@@ -4,12 +4,14 @@ import pendulum
 from datetime import datetime, timedelta
 import json
 import os
+from urllib import parse, request
 
 from airflow.decorators import dag, task
 from airflow.datasets import Dataset
 from airflow.hooks.base import BaseHook
 from airflow.models.param import Param
 from airflow.providers.docker.operators.docker import DockerOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from docker.types import Mount, DeviceRequest
 
 # [환경 설정]
@@ -19,6 +21,7 @@ DOCKER_IMAGE = 'gnn-worker:latest'
 DOCKER_NETWORK = 'crawling_news-network'
 SILVER_DATASET = Dataset("s3://silver/trainset")
 GOLD_MODEL_ARTIFACT = Dataset("s3://gold/gnn")
+DEFAULT_EXPERIMENT_NAME = "News_GNN_v1"
 
 default_args = {
     'owner': 'dongbin',
@@ -37,6 +40,11 @@ default_args = {
         "train_date": Param(
             default=datetime.now(local_tz).strftime('%Y-%m-%d'),
             type="string", format="date", description="학습할 데이터 날짜"
+        ),
+        "gate_threshold": Param(
+            default=0.25,
+            type="number",
+            description="Promote to candidate if holdout_final_final_score > threshold"
         )
     },
     tags=['gold', 'gnn', 'training']
@@ -84,6 +92,7 @@ def training_pipeline():
         return {
             "trainset_path": trainset_path,
             "output_path": output_path,
+            "candidate_version": f"v_{date_nodash}",
             "aws": aws_info,
             "config": config
         }
@@ -119,9 +128,10 @@ path_in = os.environ['TRAINSET_PATH']
 path_out = os.environ['OUTPUT_PATH']
 aws = json.loads(os.environ['AWS_INFO_JSON'])
 cfg = json.loads(os.environ['CONFIG_JSON'])
+gate_threshold = float(os.environ.get('GATE_THRESHOLD', '0.25'))
 
 # Trainer 실행
-run_training_pipeline(path_in, path_out, aws, cfg)
+run_training_pipeline(path_in, path_out, aws, cfg, gate_threshold=gate_threshold)
         "
         """,
         environment={
@@ -129,11 +139,64 @@ run_training_pipeline(path_in, path_out, aws, cfg)
             'OUTPUT_PATH': "{{ ti.xcom_pull(task_ids='prepare_config')['output_path'] }}",
             'AWS_INFO_JSON': "{{ ti.xcom_pull(task_ids='prepare_config')['aws'] | tojson }}",
             'CONFIG_JSON': "{{ ti.xcom_pull(task_ids='prepare_config')['config'] | tojson }}",
+            'GATE_THRESHOLD': "{{ params.gate_threshold }}",
             'MLFLOW_TRACKING_URI': 'http://mlflow:5000',
         },
     )
 
-    config_data >> train_task
+    @task.short_circuit
+    def check_candidate_tagged(**context):
+        candidate_version = context["ti"].xcom_pull(task_ids="prepare_config")["candidate_version"]
+        tracking_uri = "http://mlflow:5000"
+
+        exp_name_qs = parse.urlencode({"experiment_name": DEFAULT_EXPERIMENT_NAME})
+        exp_req = request.Request(
+            f"{tracking_uri}/api/2.0/mlflow/experiments/get-by-name?{exp_name_qs}",
+            method="GET"
+        )
+        with request.urlopen(exp_req, timeout=10) as resp:
+            exp_payload = json.loads(resp.read().decode("utf-8"))
+        experiment = exp_payload.get("experiment")
+        if not experiment:
+            raise ValueError(f"MLflow experiment not found: {DEFAULT_EXPERIMENT_NAME}")
+
+        filter_string = (
+            "attributes.status = 'FINISHED' "
+            "and tags.status = 'candidate' "
+            "and tags.gate_passed = 'true' "
+            f"and tags.candidate_version = '{candidate_version}'"
+        )
+        body = {
+            "experiment_ids": [experiment["experiment_id"]],
+            "filter": filter_string,
+            "order_by": ["attributes.start_time DESC"],
+            "max_results": 1,
+        }
+        runs_req = request.Request(
+            f"{tracking_uri}/api/2.0/mlflow/runs/search",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with request.urlopen(runs_req, timeout=10) as resp:
+            runs_payload = json.loads(resp.read().decode("utf-8"))
+        runs = runs_payload.get("runs", [])
+        return bool(runs)
+
+    check_gate = check_candidate_tagged()
+
+    trigger_graph2db = TriggerDagRunOperator(
+        task_id="trigger_graph2db",
+        trigger_dag_id="graph_to_db",
+        conf={
+            "model_status": "candidate",
+            "candidate_version": "{{ ti.xcom_pull(task_ids='prepare_config')['candidate_version'] }}"
+        },
+        wait_for_completion=False,
+        reset_dag_run=False,
+    )
+
+    config_data >> train_task >> check_gate >> trigger_graph2db
 
 
 training_pipeline()

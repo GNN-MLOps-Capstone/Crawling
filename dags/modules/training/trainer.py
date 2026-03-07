@@ -16,7 +16,7 @@ from modules.training.engine import train_one_epoch, evaluate, evaluate_golden_s
 from modules.training.utils import load_json_file, log_file_artifact, build_gold_similarity_report
 from modules.training.utils import set_seed 
 
-def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data_cache=None):
+def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data_cache=None, gate_threshold=0.25):
     """
     Airflow 및 Optuna에서 공용으로 사용하는 학습 파이프라인
     - raw_data_cache: (Optuna용) 이미 로드된 데이터를 넘겨받아 재사용
@@ -105,6 +105,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                 mlflow.set_tag("train_date", str(train_date))
             metric_schema = config.get('training', {}).get('metric_schema', 'v2')
             mlflow.set_tag('metric_schema', metric_schema)
+            mlflow.set_tag("artifact_store_mode", "mlflow_only")
 
             # 6. 학습 루프
             selection_metric = config.get('training', {}).get('selection_metric', 'val_mrr')
@@ -268,7 +269,6 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             print("💾 Saving Model & Embeddings...", flush=True)
             local_path = "/tmp/gnn_model.pt"
             torch.save(model.state_dict(), local_path)
-            fs.put(local_path, f"gold/{output_path}model_weights.pt")
             mlflow.log_artifact(local_path)
 
             # 임베딩 생성 (학습 완료된 모델로 전체 추론)
@@ -280,7 +280,15 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             emb_cpu = {k: v.cpu().numpy() for k, v in emb.items()}
             local_emb_path = "/tmp/node_embeddings.pkl"
             with open(local_emb_path, 'wb') as f: pickle.dump(emb_cpu, f)
-            fs.put(local_emb_path, f"gold/{output_path}node_embeddings.pkl")
+            mlflow.log_artifact(local_emb_path)
+
+            # Node mapping도 동일 run의 artifact로 보관해 serving 단계에서 동일 버전 참조
+            local_mapping_path = "/tmp/node_mapping.pkl"
+            mapping_s3_path = f"silver/{str(trainset_path).replace('hetero_graph.pt', 'node_mapping.pkl')}"
+            if fs.exists(mapping_s3_path):
+                with fs.open(mapping_s3_path, 'rb') as f_in, open(local_mapping_path, 'wb') as f_out:
+                    f_out.write(f_in.read())
+                mlflow.log_artifact(local_mapping_path)
 
             # Gold keyword/stock cosine similarity report
             report = build_gold_similarity_report(
@@ -297,11 +305,11 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                     f.write(report)
                 print(report, flush=True)
                 mlflow.log_artifact(report_path)
-                fs.put(report_path, f"gold/{output_path}gold_similarity.txt")
 
             # Cleanup
             if os.path.exists(local_path): os.remove(local_path)
             if os.path.exists(local_emb_path): os.remove(local_emb_path)
+            if os.path.exists("/tmp/node_mapping.pkl"): os.remove("/tmp/node_mapping.pkl")
             if os.path.exists("/tmp/gold_similarity.txt"): os.remove("/tmp/gold_similarity.txt")
 
             # Run summary
@@ -322,6 +330,36 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                 mlflow.log_metric("summary_holdout_final_checkpoint_score", holdout_final2)
                 mlflow.log_metric("summary_holdout_final_checkpoint_missing", holdout_missing2)
                 mlflow.set_tag("summary_holdout_final_checkpoint_epoch", str(EPOCHS))
+
+            # 9. Gate & Promotion Tagging
+            holdout_final_checkpoint = final_holdout_metrics.get("holdout_final_final_score", 0.0) if final_holdout_metrics else 0.0
+            holdout_final_checkpoint_missing = final_holdout_metrics.get("holdout_final_final_score_missing", 1.0) if final_holdout_metrics else 1.0
+            gate_passed = (
+                float(holdout_final_checkpoint_missing) == 0.0 and
+                float(holdout_final_checkpoint) > float(gate_threshold)
+            )
+            version_name = str(output_path).strip("/").split("/")[-1] if output_path else run.info.run_id
+
+            mlflow.log_metric("gate_threshold_holdout_final_final_score", float(gate_threshold))
+            mlflow.log_metric("gate_passed", 1.0 if gate_passed else 0.0)
+            mlflow.set_tag("gate_metric", "holdout_final_final_score")
+            mlflow.set_tag("gate_operator", ">")
+            mlflow.set_tag("gate_threshold", str(gate_threshold))
+            mlflow.set_tag("gate_require_missing_zero", "true")
+            mlflow.set_tag("gate_passed", str(gate_passed).lower())
+            mlflow.set_tag("candidate_version", version_name)
+
+            if gate_passed:
+                mlflow.set_tag("status", "candidate")
+                print(
+                    f"✅ Gate passed: holdout_final_final_score={holdout_final_checkpoint:.4f} > {gate_threshold}. status=candidate",
+                    flush=True
+                )
+            else:
+                print(
+                    f"⛔ Gate blocked: score={holdout_final_checkpoint:.4f}, missing={holdout_final_checkpoint_missing}, threshold={gate_threshold}",
+                    flush=True
+                )
 
         print("✅ Pipeline Finished.")
         return best_metric if best_metric is not None else 0.0
