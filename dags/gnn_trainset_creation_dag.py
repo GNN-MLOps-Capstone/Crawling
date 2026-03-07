@@ -43,8 +43,10 @@ default_args = {
 def trainset_pipeline():
     @task(multiple_outputs=True)
     def prepare_context(**context):
-        params = context.get('params', {})
-        target_date_str = params.get('target_date')
+        params = context.get('params', {}) or {}
+        dag_run = context.get("dag_run")
+        conf = dag_run.conf if dag_run and dag_run.conf else {}
+        target_date_str = conf.get('target_date', params.get('target_date'))
 
         # YYYY-MM-DD -> YYYYMMDD
         dt = pendulum.parse(target_date_str)

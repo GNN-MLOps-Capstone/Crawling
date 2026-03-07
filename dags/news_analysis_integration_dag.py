@@ -7,6 +7,7 @@ from airflow.hooks.base import BaseHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models.param import Param
 from airflow.models import Variable
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # [환경 설정]
 PYTHON_VENV_PATH = '/opt/airflow/venv_nlp/bin/python'
@@ -97,6 +98,12 @@ def analysis_integration_pipeline():
 
         return result
 
+    @task
+    def resolve_trainset_target_date(dates):
+        if not dates:
+            raise ValueError("No dates available to trigger gnn_trainset_creation")
+        return max(dates)
+
     #2. Refinement
     @task.external_python(python=PYTHON_VENV_PATH, task_id='refinement')
     def task_refine(updated_dates, aws_info, pg_info):
@@ -170,7 +177,20 @@ def analysis_integration_pipeline():
     # Loading은 모든 분석 및 스냅샷 완료 후
     loaded = task_load(ctx['dates'], ctx['aws'], snapshot, pg_info)
     status_after = report_filter_status(ctx['dates'], 'after')
+    target_date = resolve_trainset_target_date(ctx['dates'])
+
+    trigger_trainset = TriggerDagRunOperator(
+        task_id="trigger_gnn_trainset_creation",
+        trigger_dag_id="gnn_trainset_creation",
+        conf={
+            "target_date": "{{ ti.xcom_pull(task_ids='resolve_trainset_target_date') }}"
+        },
+        wait_for_completion=False,
+        reset_dag_run=False,
+    )
+
     loaded >> status_after
+    status_after >> target_date >> trigger_trainset
 
 
 dag_instance = analysis_integration_pipeline()
