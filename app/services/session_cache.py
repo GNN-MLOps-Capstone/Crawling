@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,9 @@ class RecommendationSession:
     user_id: str
     limit: int
     timeline_ids: list[int]
-    path_a_queue: list[int]
-    path_b_queue: list[int]
-    path_c_queue: list[int] = field(default_factory=list)
+    onboarding_queue: list[int]
+    behavior_queue: list[int]
+    breaking_queue: list[int]
     served_ids: list[int] = field(default_factory=list)
     current_mix_policy: dict[str, int] = field(default_factory=dict)
     batch_generation_id: int = 1
@@ -24,10 +25,15 @@ class RecommendationSession:
     last_served_at: float = field(default_factory=time.time)
     fallback_used: bool = False
     fallback_reason: str | None = None
-    source: str = "phase1a_hybrid"
+    source: str = "multipath_mixed"
     prefetch_triggered: bool = False
     prefetch_status: str = "idle"
+    prefetch_trigger_path: str | None = None
     prefetched_timeline_ids: list[int] = field(default_factory=list)
+    prefetched_onboarding_queue: list[int] = field(default_factory=list)
+    prefetched_behavior_queue: list[int] = field(default_factory=list)
+    prefetched_breaking_queue: list[int] = field(default_factory=list)
+    debug_context: dict[str, Any] = field(default_factory=dict)
     cache_key: str = ""
 
     def touch(self) -> None:
@@ -85,7 +91,34 @@ class RedisSessionCache(SessionCache):
         )
 
 
+class ResilientSessionCache(SessionCache):
+    def __init__(self, primary: SessionCache, fallback: SessionCache) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def get(self, request_id: str) -> RecommendationSession | None:
+        try:
+            session = self._primary.get(request_id)
+            if session is not None:
+                return session
+        except Exception as exc:
+            logger.warning("primary session cache get failed, using fallback backend: %s", exc)
+        return self._fallback.get(request_id)
+
+    def set(self, request_id: str, session: RecommendationSession, ttl_seconds: int) -> None:
+        primary_failed = False
+        try:
+            self._primary.set(request_id, session, ttl_seconds)
+        except Exception as exc:
+            primary_failed = True
+            logger.warning("primary session cache set failed, using fallback backend: %s", exc)
+
+        if primary_failed or self._fallback.get(request_id) is not None:
+            self._fallback.set(request_id, session, ttl_seconds)
+
+
 def build_session_cache(*, host: str, port: int, password: str | None) -> SessionCache:
+    fallback = InMemorySessionCache()
     try:
         import redis
 
@@ -100,6 +133,6 @@ def build_session_cache(*, host: str, port: int, password: str | None) -> Sessio
         client.ping()
     except Exception as exc:
         logger.warning("session cache falling back to in-memory backend: %s", exc)
-        return InMemorySessionCache()
+        return fallback
 
-    return RedisSessionCache(client)
+    return ResilientSessionCache(RedisSessionCache(client), fallback)

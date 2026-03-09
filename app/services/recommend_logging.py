@@ -31,10 +31,11 @@ class RequestLog:
     fallback_reason: str | None
     prefetch_triggered: bool
     prefetch_status: str
+    prefetch_trigger_path: str | None
     batch_generation_id: int
-    path_a_remaining: int
-    path_b_remaining: int
-    path_c_remaining: int
+    onboarding_remaining: int
+    behavior_remaining: int
+    breaking_remaining: int
     mix_ratio: dict[str, int]
     source: str
 
