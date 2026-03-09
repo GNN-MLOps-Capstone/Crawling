@@ -29,7 +29,7 @@ default_args = {
 @dag(
     dag_id='gnn_trainset_creation',
     default_args=default_args,
-    schedule_interval=None,
+    schedule='0 4 * * *',
     start_date=datetime(2025, 1, 1, tzinfo=local_tz),
     catchup=False,
     params={
@@ -46,7 +46,15 @@ def trainset_pipeline():
         params = context.get('params', {}) or {}
         dag_run = context.get("dag_run")
         conf = dag_run.conf if dag_run and dag_run.conf else {}
-        target_date_str = conf.get('target_date', params.get('target_date'))
+        scheduled_target_date = context['logical_date'].subtract(days=1).to_date_string()
+        run_type = str(getattr(dag_run, "run_type", "")).lower()
+
+        if conf.get('target_date'):
+            target_date_str = conf['target_date']
+        elif run_type == 'scheduled':
+            target_date_str = scheduled_target_date
+        else:
+            target_date_str = params.get('target_date') or scheduled_target_date
 
         # YYYY-MM-DD -> YYYYMMDD
         dt = pendulum.parse(target_date_str)
