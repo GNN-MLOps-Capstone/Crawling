@@ -1,290 +1,229 @@
-# Recommendation Server API Draft (FastAPI)
+# Recommendation API Product And Architecture Draft
 
-## 1) Scope
+## 0. Document Scope
 
-- Endpoint: `POST /recommend/news`
-- Language/Framework: Python + FastAPI
-- Current goal: `filtered_news` 기반 Mock 추천 API 제공
-- Future goal: 로그/온보딩/벡터/LLM/MAB로 확장 가능한 계약(Contract) 유지
+- 기준일: `2026-03-09`
+- 이 문서는 추천 API에서 "무엇을 만들 것인가"를 정리하는 상위 스펙 문서다.
+- 구현 작업, 테스트 순서, 운영 체크리스트는 [recommendation_api_operations_draft.md](/home/dobi/Crawling/docs/recommendation_api_operations_draft.md)에서 관리한다.
+- 현재 코드와 문서가 다르면, 구현 전까지의 실제 동작은 코드 기준으로 본다.
 
-## 2) API Contract
+## 1. Background And Problem (Why We Pivot)
 
-### Request
+- 기존 구상은 GNN, LightGBM 기반 랭킹 모델과 이를 뒷받침하는 대규모 행동 로그, 학습 파이프라인, 운영 자동화를 전제로 했다.
+- 하지만 현재 상태에서는 클릭, 체류시간, 노출 로그가 충분히 적재되지 않았고, 남은 개발 기간 안에 이를 안정적으로 구축해 E2E 검증까지 마치는 것은 과도한 범위다.
+- 따라서 v1은 "무거운 학습 파이프라인"보다 "짧은 기간 안에 실제로 서빙 가능한 추천 구조"에 집중한다.
+- 새 방향은 데이터 의존도를 낮추면서 본문 전체 비교의 노이즈를 줄이기 위해, 정제된 종목/키워드 임베딩 기반 멀티 패스 리트리벌, LLM 랭킹, MAB 기반 믹싱을 결합한 하이브리드 구조다.
+- 동시에 초반부터 온라인 지표와 오프라인 점검 기준을 함께 설계해, 추천 품질 개선 여부를 관측 가능하게 만든다.
 
-```json
-{
-  "user_id": "string",
-  "limit": 20,
-  "cursor": "string|null",
-  "request_id": "string|null",
-  "context": {}
-}
-```
+## 2. Product Goal
 
-- Required: `user_id`, `limit`
-- Optional: `cursor`, `request_id`, `context`
-- `context`는 확장 전용 JSON object (온보딩/행동로그/실험군/디바이스 등)
+### 현재 상태
 
-### Response
+- 엔드포인트는 `POST /recommend/news`다.
+- FastAPI 추천 API는 이미 존재한다.
+- 현재는 개인화 없이 최신 뉴스 `news_id`를 cursor 기반으로 반환하는 mock 단계다.
+- 현재 cursor는 `request_id/offset/limit`만 유지하고, 추천 결과 리스트 자체를 캐시하지 않는다.
 
-```json
-{
-  "request_id": "string",
-  "items": [
-    {"news_id": 123},
-    {"news_id": 456}
-  ],
-  "next_cursor": "string|null",
-  "meta": {
-    "source": "mock_latest",
-    "fallback_used": false
-  }
-}
-```
+### v1 목표
 
-- `items`는 `news_id`만 반환
-- `request_id`는 요청 추적/캐시 키로 사용
+- v1은 "완전한 ML 개인화 시스템"이 아니라 "실제로 서빙 가능한 하이브리드 추천 파이프라인" 구축이 목표다.
+- 추천 응답은 아래 성격의 후보를 함께 다뤄야 한다.
+  - 개인화 후보
+  - 최신 속보 후보
+- 최종 서빙 직전에는 단일 최신순이 아니라 경로별 후보를 혼합하는 구조를 가져야 한다.
+- 장애나 입력 부족 시에도 앱 화면에는 자연스러운 fallback 결과가 나와야 한다.
 
-## 3) Validation Rules
+### 단계별 목표
 
-- `limit`: `1 <= limit <= 100` 권장
-- `cursor`가 있으면 opaque token decode 후 아래 검증 수행
-  - `cursor.v` 지원 버전인지 확인
-  - `cursor.limit`과 요청 `limit`이 다르면 `400 Bad Request`
-- `context`는 dict(object)만 허용 (`null`은 빈 object로 처리 가능)
-- `request_id`가 없으면 서버에서 UUID 생성
+- 1단계
+  - 1A. `context`가 비어 있어도 동작하는 Path A/LLM 뼈대 구축
+  - 1A. 세션 캐시와 cursor slice 구조 구축
+  - 1A. Path B 최신 속보 경로와 fallback 구축
+  - 1B. 확정된 `context` 계약을 Path A와 LLM prompt에 반영
+  - 1B. 온보딩/행동 로그를 `context`로 연결
+- 2단계
+  - Path C 인기 탐색 경로 보강
+  - 클릭 로그 기반 MAB 도입
+  - 경로별 mix ratio 동적 조정
 
-### Error Shape (권장)
+### v1 비목표
 
-```json
-{
-  "error": {
-    "code": "INVALID_CURSOR_LIMIT_MISMATCH",
-    "message": "cursor.limit must equal request.limit",
-    "request_id": "..."
-  }
-}
-```
+- 대규모 행동 로그를 전제로 한 GNN 학습 파이프라인
+- LightGBM 기반 학습 랭커 서빙
+- 완성형 MLOps 자동화
+- 모든 Path에 대한 LLM 재정렬
+- 고도화된 장기 사용자 프로파일링
 
-## 4) Cursor Design
+## 3. Target Recommendation Architecture
 
-- 형식: base64url(JSON) + (선택) 서명(HMAC)
-- opaque token 원칙: 클라이언트가 내부 필드를 해석하지 않음
-- 최소 포함 필드
-  - `v`: cursor schema version (예: `1`)
-  - `limit`
-  - `offset` 또는 `(last_pub_date, last_news_id)`
-- 권장 payload 예시
+추천 파이프라인은 후보를 하나의 검색 방식으로 뽑는 대신, 성격이 다른 여러 경로에서 확보한 뒤 서빙 직전에 혼합하는 구조를 따른다.
 
-```json
-{
-  "v": 1,
-  "limit": 20,
-  "offset": 40,
-  "request_id": "req_abc123",
-  "issued_at": "2026-03-05T12:00:00Z"
-}
-```
+### 3.1 Stage 1. Base Pool
 
-## 5) Mock Recommendation Logic (현재 동작)
+- 목적: 전체 뉴스에서 추천 연산 대상이 될 최신 기사 집합을 먼저 좁힌다.
+- 기본 방향
+  - 최근 며칠 이내 기사만 대상으로 한다.
+  - 초기 구현에서는 최근 `3일` 이내 기사 약 `3,000`건을 기준 pool로 본다.
+- 기대 효과
+  - 리트리벌 비용을 줄인다.
+  - stale item 비중을 제어한다.
 
-- `user_id`는 추천 계산에 사용하지 않고 로그에만 기록
-- DB 조회: `filtered_news` 최신순
-- `limit`만큼 `news_id` 반환
-- 정렬 안정성 확보를 위해 tie-breaker 포함 권장
-  - `ORDER BY published_at DESC, news_id DESC`
+### 3.2 Stage 2. Multi-Path Retrieval
 
-### SQL Example
+- 목적: 서로 다른 추천 목적을 가진 후보 바구니를 병렬로 만든다.
+- 기본 경로는 아래 세 가지다.
 
-```sql
-SELECT news_id, published_at
-FROM filtered_news
-WHERE published_at <= NOW()
-ORDER BY published_at DESC, news_id DESC
-LIMIT :limit OFFSET :offset;
-```
+| Path | 목적 | 기본 로직 | 데이터 소스 |
+| --- | --- | --- | --- |
+| Path A | 기본 추천 + 개인화 확장 | `context`가 없으면 더 넓은 최신 풀에서 최신순 후보를 만들고, `context`가 있으면 여기에 개인화 신호를 누적 | RDBMS + 이후 임베딩 저장소 |
+| Path B | 최신 속보 | Path A보다 더 짧은 시간창의 속보 기사 우선 추출 | RDBMS |
+| Path C | 인기 탐색 | 앱 내 CTR이 높은 타 카테고리 기사 추출 | RDBMS + 집계 로그 |
 
-## 6) Caching Strategy (request_id 단위)
+- 1단계 초기 목표는 Path A `50개`, Path B `30개` 수준의 후보를 확보하는 것이다.
+- `context`가 없는 1A에서는 Path A가 "넓은 최신성", Path B가 "짧은 속보성" 역할을 맡는다.
+- Path A는 본문 전체가 아니라 정제된 키워드/종목 표현을 우선 사용하되, 1A에서는 최신순 baseline으로 먼저 시작할 수 있다.
 
-- 점수 계산 단위: 후보 100개 선계산 후 캐시
-- Cache key: `reco:{user_id}:{request_id}:{model_version}`
-- Value 예시
-  - `ordered_news_ids`: `[ ... up to 100 ]`
-  - `created_at`, `expires_at`
-  - `meta`: `source`, `cache_status`
-- TTL: 5~10분 (초기 600초 권장)
-- 만료 시 재계산
-- 동일 `request_id`에서는 순서 불변 보장
-  - 최초 계산 결과를 그대로 paging
-- 저장소 권장: Redis
+### 3.3 Stage 3. LLM As A Ranker
 
-## 7) FastAPI Suggested Structure
+- 목적: Path A의 개인화 후보를 더 정밀하게 재정렬한다.
+- 적용 범위
+  - 초기에는 Path A 후보 `50`개 전체를 재정렬 대상으로 본다.
+  - Path B, Path C는 초기에는 LLM 재정렬 없이 유지한다.
+- 기본 로직
+  - Path A에서 이미 압축된 후보 리스트를 LLM에 전달한다.
+  - 후보별 `relevance`, `novelty`, `clarity`, `final` 점수를 산출한다.
+  - 최종 정렬은 애플리케이션이 `final` 점수 기준으로 수행한다.
+- `context`가 없을 때도 같은 prompt shape를 유지하되, 빈 슬롯에는 기본 문구를 넣어 일반 추천 점수를 계산하게 한다.
+- 목적은 "모든 경로를 LLM으로 처리"하는 것이 아니라, 비용과 지연을 통제하면서 Path A 후보의 정밀도를 높이는 것이다.
 
-```text
-app/
-  main.py
-  api/
-    recommend.py
-  schemas/
-    recommend.py
-  services/
-    recommend_service.py
-    cursor_service.py
-    cache_service.py
-  repositories/
-    news_repository.py
-  core/
-    config.py
-    logging.py
-```
+### 3.4 Stage 4. Mixing And Exploration
 
-- Router: `/recommend/news`
-- Pydantic model로 request/response 엄격 검증
-- Service 계층에서 캐시/DB/후보선정/페이징 분리
+- 목적: 최종 노출 리스트를 개인화와 탐색이 공존하는 형태로 구성한다.
+- 기본 방향
+  - 1A에서는 Path A가 넓은 최신성 baseline 역할을 한다.
+  - 1B부터 Path A는 개인화 exploitation 역할을 강화한다.
+  - 1단계에서는 Path B가 속보성 보강 및 exploration 역할을 한다.
+  - 2단계부터는 Path C와 MAB를 붙여 동적 비율 조정을 시작한다.
+- 최종 노출 비율은 사람이 고정하지 않고 MAB가 결정한다.
+- 문서에 남는 비율은 MAB의 초기 prior 또는 비활성화 시 fallback guardrail로만 사용한다.
+- 초기 prior는 Path A 우세 구조를 두되, Path B와 Path C가 학습 가능한 최소 슬롯은 확보하는 방향이 적절하다.
 
-## 8) Future-Proofing (context 확장)
+### 3.5 Stage 5. Session Cache And Refill
 
-- 원칙
-  - 기존 필드(`user_id`, `limit`) 유지
-  - 신규 입력은 `context` 하위에만 추가
-  - 응답 호환성 유지 (`items[].news_id` 유지)
-- `context` 예시
+- 목적: 같은 세션 안에서 추천 순서를 고정하고, 페이지 이동 시 LLM 재호출을 피한다.
+- 기본 방향
+  - 첫 요청에서 Path A/B와 LLM을 거쳐 path별 candidate queue를 생성한다.
+  - 세션 캐시에는 `request_id` 기준으로 `A/B/C queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
+  - 다음 페이지 요청은 현재 mix policy에 따라 각 path queue에서 필요한 개수만큼 꺼내 page를 합성한다.
+  - prefetch는 전체 잔량이 아니라 path별 병목 기준으로 판단한다.
+  - 1A 기준 기본 trigger는 `Path A remaining <= 20`이다.
+  - 현재 batch가 소진되면 prefetch된 다음 batch 또는 보충 queue로 자연스럽게 전환한다.
+- 기대 효과
+  - 같은 세션 안에서 결과 순서가 안정적으로 유지된다.
+  - 페이지 이동마다 LLM을 다시 호출하지 않아도 된다.
+  - 마지막 페이지 이후 응답 지연을 줄일 수 있다.
+  - 특정 path만 먼저 바닥나서 mix가 무너지는 문제를 줄일 수 있다.
 
-```json
-{
-  "onboarding": {"risk_profile": "balanced"},
-  "behavior": {"recent_click_keywords": ["AI", "반도체"]},
-  "experiment": {"mab_group": "B"}
-}
-```
+## 4. Serving Principles
 
-## 9) Target Architecture Mapping (요구사항 반영)
+### 4.1 Response Shape
 
-1. Base Pool
-- 최근 3일 뉴스 약 3,000건 추출
+- 응답은 기존 `POST /recommend/news` 계약을 유지한다.
+- 최소 응답 필드
+  - `request_id`
+  - `items[].news_id`
+  - `next_cursor`
+  - `meta.source`
+  - `meta.fallback_used`
 
-2. Multi-Path Retrieval
-- Path A: 개인화 유사도(벡터)
-- Path B: 1~2시간 속보
-- Path C: 전체 인기(CTR)
-- 후보/서빙 로그 메타 설계:
-  - `path_source`, `position`, `request_id`, `impression_id`, `is_fallback`, `latency_ms`, `cache_status`
+### 4.2 Session And Pagination
 
-3. Ranking
-- Path A(100개)에 대해서만 LLM scoring 후 상위 50~60
+- cursor 기반 pagination은 유지한다.
+- 클라이언트는 같은 `request_id` 기준으로 다음 페이지를 요청한다.
+- 추천 결과는 `request_id` 단위 세션 캐시에 path별 queue와 served state로 저장되는 것을 기본 전제로 한다.
+- cursor는 현재 세션 상태에서 다음 page를 생성하기 위한 포인터 역할을 한다.
+- 구현 상세는 바뀔 수 있지만, 사용자 입장에서는 페이지 간 결과 순서가 일관되어야 한다.
 
-4. Mixing(MAB)
-- 예: 20개 결과 = A(14) + B(3) + C(3)
-- 클릭 reward로 비율 동적 업데이트
+### 4.3 Refill Principle
 
-## 10) 해야 할 것 (Execution TODO)
+- 추천 세션은 "매 페이지 재계산"이 아니라 "배치 생성 후 소진" 구조를 따른다.
+- 현재 batch가 남아 있으면 캐시된 path queue를 우선 사용한다.
+- prefetch는 전체 잔량이 아니라 path별 병목 기준으로 판단한다.
+- 1A 기본 규칙은 `Path A remaining <= 20`일 때 다음 batch 또는 Path A 보충을 시작하는 것이다.
+- prefetch에 실패해도 현재 batch 서빙은 유지하고, 소진 시점에 재생성 또는 fallback으로 degrade 한다.
 
-### P0 (Mock API 출시)
+### 4.4 Bandit Principle
 
-- [ ] FastAPI 앱 골격 추가 (`app/main.py`, router 등록)
-- [ ] `POST /recommend/news` 스키마/검증 구현
-- [ ] cursor encode/decode 유틸 + `limit mismatch -> 400` 처리
-- [ ] `filtered_news` 최신순 조회 repository 구현
-- [ ] request_id 발급/전달 로직 구현
-- [ ] 기본 메타(`source=mock_latest`, `fallback_used=false`) 반환
-- [ ] 구조화 로그(요청/응답/latency/request_id/user_id) 추가
-- [ ] Dockerfile 추가 (`dockerfile/recommend-api.Dockerfile`)
-- [ ] `docker-compose.yaml`에 `recommend-api` 서비스 추가
-  - [ ] depends_on: `news-database`, `redis`
-  - [ ] healthcheck: `/healthz`
-  - [ ] networks: `news-network` (+ 필요 시 `proxy-net`)
-- [ ] 컨테이너 실행 커맨드 고정 (`uvicorn app.main:app --host 0.0.0.0 --port 8000`)
-- [ ] 단위 테스트
-  - [ ] request validation
-  - [ ] cursor validation
-  - [ ] pagination consistency
+- 최종 노출 슬롯의 Path별 배분은 MAB가 결정하는 것을 원칙으로 한다.
+- 사람이 직접 고정하는 값은 최종 mix가 아니라 MAB의 초기 prior, 최소/최대 가드레일, 비활성화 시 fallback 비율이다.
+- 따라서 retrieval 단계의 후보 수와 serving 단계의 최종 mix를 구분해서 설계해야 한다.
 
-### P1 (캐시/안정화)
+### 4.5 Fallback Principle
 
-- [ ] Redis 연결 및 `user_id+request_id+model_version` 키 적용
-- [ ] 후보 100개 선계산 후 캐시 저장
-- [ ] 동일 request_id 재요청 시 순서 불변성 테스트
-- [ ] TTL(5~10분) 정책 및 만료 재계산 경로 구현
-- [ ] 장애시 fallback 정책 정의 (`fallback_used=true`)
+- 입력 부족은 실패가 아니다.
+- `context`가 없으면 Path A는 더 넓은 최신 풀, Path B는 더 짧은 속보 풀 기준으로 동작한다.
+- 개인화 경로가 약하면 우선 최신 경로 비중을 늘린다.
+- 이후 2단계에서 인기 경로가 안정화되면 MAB prior와 latest/popular 조합 기반 fallback을 확장한다.
+- LLM, MAB, 캐시, 일부 리트리벌 경로에 문제가 생겨도 앱 화면에는 fallback 결과가 반환되어야 한다.
+- fallback은 빈 화면보다 latest/popular 조합을 우선한다.
 
-### P2 (추천 고도화)
+### 4.6 Cold Start Principle
 
-- [ ] Base Pool(3일/3000개) 쿼리 최적화 및 인덱스 점검
-- [ ] Path A/B/C 후보 추출기 분리
-- [ ] LLM ranker 인터페이스 + 점수 스키마(relevance/novelty/clarity/final)
-- [ ] MAB mixing 정책 모듈화 + reward 로그 수집
-- [ ] 관측성(대시보드)
-  - [ ] path별 CTR
-  - [ ] cache hit ratio
-  - [ ] p95 latency
+- 신규 사용자에게도 결과가 나와야 한다.
+- 방금 발행된 신규 기사도 병목 없이 후보에 들어올 수 있어야 한다.
+- 사용자 로그가 없어도 Path A 최신 풀과 Path B 속보 풀만으로 기본 서빙이 가능해야 한다.
 
-## 11) Open Decisions
+## 5. Evaluation And Success Criteria
 
-- `limit` 상한값 (20 고정 vs 100 허용)
-- cursor에 HMAC 서명 적용 여부
-- request_id 생성 주체 (클라이언트 우선 vs 서버 강제)
-- model_version 관리 방식 (환경변수 vs DB)
-- fallback 시나리오 우선순위 (캐시 실패/DB 실패/랭커 실패)
+### 5.1 Latency And Stability
 
-## 12) Docker Deployment Draft (API)
+- 목표는 추천 API가 앱에서 체감 가능한 속도로 응답하는 것이다.
+- 캐시 hit 구간에서는 `0.2초` 수준 응답을 지향한다.
+- miss 구간은 더 느릴 수 있지만, 앱 사용성에 문제 없는 수준으로 통제해야 한다.
+- 특히 페이지 이동 요청은 세션 캐시 hit를 기본값으로 두고, 마지막 페이지 인근의 refill 지연을 최소화해야 한다.
 
-### Service Name
+### 5.2 Online Metrics
 
-- `recommend-api` (FastAPI)
+- 아래 지표는 애플리케이션 구조화 로그를 기반으로 일 단위 집계와 모니터링이 가능해야 한다.
+  - `CTR@5/10/20`
+  - `First Click Rate`
+  - `Clicks Per Session`
+  - `Mix Ratio(A/B/C)`
+  - `Path-wise CTR`
+  - `Exploration Slot CTR`
+  - `Latency p50/p95`
+  - `Cache Hit Rate`
+  - `Prefetch Success Rate`
+  - `Fallback Rate`
+  - `LLM Timeout/Error Rate`
 
-### Container Requirements
+### 5.3 Offline Evaluation
 
-- Base: `python:3.11-slim` 권장
-- App port: `8000`
-- Runtime: `uvicorn`
-- Readiness/Liveness endpoint: `GET /healthz`
+- 초기 로그가 부족하더라도 최신순 baseline 대비 품질 차이를 점검할 수 있어야 한다.
+- 오프라인 점검에서는 아래 항목을 함께 본다.
+  - 다양성
+  - 중복률
+  - 최신성
+  - 안정성
+- 필요 시 AI 보조 평가를 사용하되, baseline 대비 어떤 지표가 개선되었는지 명시적으로 비교한다.
 
-### Environment Variables (예시)
+### 5.4 Qualitative Success
 
-- `RECO_API_PORT=8000`
-- `RECO_MODEL_VERSION=v1`
-- `RECO_CACHE_TTL_SEC=600`
-- `NEWS_DB_HOST=news-database`
-- `NEWS_DB_PORT=5432`
-- `NEWS_DB_NAME=${DATA_POSTGRES_DB_NAME}`
-- `NEWS_DB_USER=${DATA_POSTGRES_USER}`
-- `NEWS_DB_PASSWORD=${DATA_POSTGRES_PASSWORD}`
-- `REDIS_HOST=redis`
-- `REDIS_PORT=6379`
-- `REDIS_PASSWORD=${REDIS_PASSWORD}`
+- 특정 카테고리 편중만 심한 결과가 아니라, 개인화와 탐색이 의도한 비율로 함께 노출되어야 한다.
+- 사용자는 추천 피드가 "모두 같은 기사" 또는 "전부 최신 기사만 나열된 화면"처럼 느껴지지 않아야 한다.
 
-### Compose Integration (예시 스펙)
+### 5.5 Safety And Reliability
 
-```yaml
-recommend-api:
-  build:
-    context: .
-    dockerfile: dockerfile/recommend-api.Dockerfile
-  command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-  environment:
-    RECO_MODEL_VERSION: v1
-    RECO_CACHE_TTL_SEC: 600
-    NEWS_DB_HOST: news-database
-    NEWS_DB_PORT: 5432
-    NEWS_DB_NAME: ${DATA_POSTGRES_DB_NAME}
-    NEWS_DB_USER: ${DATA_POSTGRES_USER}
-    NEWS_DB_PASSWORD: ${DATA_POSTGRES_PASSWORD}
-    REDIS_HOST: redis
-    REDIS_PORT: 6379
-    REDIS_PASSWORD: ${REDIS_PASSWORD}
-  depends_on:
-    news-database:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  healthcheck:
-    test: ["CMD", "curl", "--fail", "http://localhost:8000/healthz"]
-    interval: 30s
-    timeout: 5s
-    retries: 5
-    start_period: 20s
-  restart: always
-  networks:
-    - news-network
-    - proxy-net
-```
+- 예외 상황에서도 앱 화면에 에러나 과도한 지연이 직접 노출되지 않아야 한다.
+- 클릭 로그가 적재되고, 이 로그가 이후 믹싱 또는 보상 계산에 반영되는 데이터 루프가 확인되어야 한다.
+
+## 6. Open Product Decisions
+
+- Path A에서 사용할 개인화 입력의 최소 집합을 어디까지 둘지
+- `context` 없는 1A baseline에서 Path A의 최신 풀 시간 범위를 어디까지 둘지
+- prefetch 임계치를 남은 몇 개 기준으로 둘지
+- next batch 생성을 FastAPI 내부 비동기 처리로 둘지, 별도 작업 큐로 분리할지
+- Path C의 "인기"를 CTR만으로 볼지, recency를 섞을지
+- 초기 MAB의 최소 단위를 Path 단위로 둘지, 슬롯 단위까지 세분화할지
+- 캐시 miss 시 새 세션 발급과 기존 세션 복원 중 무엇을 우선할지
+- 온라인 지표 대시보드의 최소 공개 범위를 어디까지 둘지
