@@ -17,9 +17,113 @@ class NewsCandidate:
     url: str
     category: str
     domain: str
+    score: float | None = None
 
 
 class NewsRepository:
+    def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT stock_id::varchar
+                    FROM watchlist
+                    WHERE user_id = %s
+                    ORDER BY stock_id
+                    """,
+                    (user_id,),
+                )
+                stock_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT keyword_id::varchar
+                    FROM user_onboarding_keywords
+                    WHERE user_id = %s
+                    ORDER BY keyword_id
+                    """,
+                    (user_id,),
+                )
+                keyword_rows = cur.fetchall()
+
+        stock_ids = [str(row[0]) for row in stock_rows]
+        keyword_ids = [str(row[0]) for row in keyword_rows]
+        if not stock_ids and not keyword_ids:
+            return {}
+        return {
+            "stock_ids": stock_ids,
+            "keyword_ids": keyword_ids,
+        }
+
+    def fetch_recent_actions(
+        self,
+        *,
+        user_id: int,
+        limit: int,
+        dwell_threshold_seconds: int,
+    ) -> list[dict[str, object]]:
+        query = """
+            WITH session_events AS (
+                SELECT
+                    news_id,
+                    content_session_id,
+                    MIN(CASE WHEN event_type = 'content_open' THEN event_ts_client END) AS view_ts,
+                    MAX(CASE WHEN event_type = 'content_leave' THEN event_ts_client END) AS leave_ts,
+                    MAX(event_ts_client) AS latest_event_ts
+                FROM interaction_events
+                WHERE user_id = %s::varchar
+                  AND event_type IN ('content_open', 'content_leave')
+                  AND news_id IS NOT NULL
+                GROUP BY news_id, content_session_id
+            ),
+            qualified_sessions AS (
+                SELECT
+                    news_id,
+                    COALESCE(leave_ts, latest_event_ts) AS action_ts,
+                    EXTRACT(EPOCH FROM (COALESCE(leave_ts, latest_event_ts) - view_ts)) AS dwell_seconds
+                FROM session_events
+                WHERE view_ts IS NOT NULL
+            )
+            SELECT
+                qs.news_id,
+                qs.action_ts,
+                qs.dwell_seconds,
+                COALESCE(
+                    ARRAY_AGG(DISTINCT nk.keyword_id::varchar)
+                    FILTER (WHERE nk.keyword_id IS NOT NULL),
+                    '{}'
+                ) AS keyword_ids,
+                COALESCE(
+                    ARRAY_AGG(DISTINCT ns.stock_id::varchar)
+                    FILTER (WHERE ns.stock_id IS NOT NULL),
+                    '{}'
+                ) AS stock_ids
+            FROM qualified_sessions qs
+            LEFT JOIN news_keyword_mapping nk ON nk.news_id = qs.news_id
+            LEFT JOIN news_stock_mapping ns ON ns.news_id = qs.news_id
+            WHERE qs.dwell_seconds >= %s
+            GROUP BY qs.news_id, qs.action_ts, qs.dwell_seconds
+            ORDER BY qs.action_ts DESC, qs.news_id DESC
+            LIMIT %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, dwell_threshold_seconds, limit))
+                rows = cur.fetchall()
+
+        actions: list[dict[str, object]] = []
+        for news_id, action_ts, dwell_seconds, keyword_ids, stock_ids in rows:
+            actions.append(
+                {
+                    "news_id": int(news_id),
+                    "timestamp": action_ts.isoformat() if action_ts is not None else None,
+                    "dwell_seconds": float(dwell_seconds) if dwell_seconds is not None else None,
+                    "keyword_ids": [str(item) for item in (keyword_ids or [])],
+                    "stock_ids": [str(item) for item in (stock_ids or [])],
+                }
+            )
+        return actions
+
     def fetch_latest_news_ids(self, *, limit: int, offset: int) -> list[int]:
         query = """
             SELECT fn.news_id
@@ -35,15 +139,82 @@ class NewsRepository:
                 rows = cur.fetchall()
         return [int(row[0]) for row in rows]
 
+    def fetch_news_entities(self, *, news_ids: list[int]) -> dict[int, dict[str, list[str]]]:
+        if not news_ids:
+            return {}
+
+        keyword_query = """
+            SELECT news_id, keyword_id::varchar
+            FROM news_keyword_mapping
+            WHERE news_id = ANY(%s)
+        """
+        stock_query = """
+            SELECT news_id, stock_id::varchar
+            FROM news_stock_mapping
+            WHERE news_id = ANY(%s)
+        """
+
+        entities: dict[int, dict[str, list[str]]] = {
+            int(news_id): {"keyword_ids": [], "stock_ids": []}
+            for news_id in news_ids
+        }
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(keyword_query, (news_ids,))
+                for news_id, keyword_id in cur.fetchall():
+                    entities[int(news_id)]["keyword_ids"].append(str(keyword_id))
+                cur.execute(stock_query, (news_ids,))
+                for news_id, stock_id in cur.fetchall():
+                    entities[int(news_id)]["stock_ids"].append(str(stock_id))
+
+        return entities
+
+    def fetch_entity_embeddings(
+        self,
+        *,
+        entity_refs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], list[float]]:
+        if not entity_refs:
+            return {}
+
+        params = [(entity_id, entity_type) for entity_type, entity_id in entity_refs]
+        query = """
+            SELECT entity_id, LOWER(entity_type), gnn_embedding::text
+            FROM test_service_embeddings
+            WHERE (entity_id, LOWER(entity_type)) IN (
+                SELECT entity_id, LOWER(entity_type)
+                FROM UNNEST(%s::text[], %s::text[]) AS t(entity_id, entity_type)
+            )
+        """
+        entity_ids = [entity_id for entity_id, _ in params]
+        entity_types = [entity_type for _, entity_type in params]
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (entity_ids, entity_types))
+                rows = cur.fetchall()
+
+        embeddings: dict[tuple[str, str], list[float]] = {}
+        for entity_id, entity_type, raw_embedding in rows:
+            vector = self._parse_embedding(raw_embedding)
+            if vector:
+                embeddings[(str(entity_type), str(entity_id))] = vector
+        return embeddings
+
     def fetch_recent_candidates(
         self,
         *,
         limit: int,
         hours: int,
         exclude_ids: set[int],
+        stale_cutoff_minutes: int | None = None,
         blocked_domains: tuple[str, ...] = (),
     ) -> list[NewsCandidate]:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
+        stale_cutoff = None
+        if stale_cutoff_minutes is not None:
+            stale_cutoff = datetime.utcnow() - timedelta(minutes=stale_cutoff_minutes)
         query = """
             SELECT nn.news_id, nn.title, nn.pub_date, nn.url
             FROM filtered_news fn
@@ -66,6 +237,8 @@ class NewsRepository:
             url = str(row[3] or "")
             domain = urlparse(url).netloc.replace("www.", "") if url else "unknown"
             if domain and domain in blocked_domains:
+                continue
+            if stale_cutoff is not None and row[2] is not None and row[2] < stale_cutoff:
                 continue
             candidates.append(
                 NewsCandidate(
@@ -90,3 +263,18 @@ class NewsRepository:
             user=settings.db_user,
             password=settings.db_password,
         )
+
+    @staticmethod
+    def _parse_embedding(raw_embedding: object) -> list[float]:
+        if raw_embedding is None:
+            return []
+        if isinstance(raw_embedding, (list, tuple)):
+            return [float(value) for value in raw_embedding]
+
+        text = str(raw_embedding).strip()
+        if not text:
+            return []
+        text = text.strip("[]")
+        if not text:
+            return []
+        return [float(value.strip()) for value in text.split(",") if value.strip()]

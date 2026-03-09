@@ -7,7 +7,6 @@ from app.repositories.news_repository import NewsRepository
 from app.schemas.recommend import RecommendNewsRequest, RecommendNewsResponse
 from app.services.context_builder import RecommendContextBuilder
 from app.services.cursor_service import CursorError
-from app.services.rerank_service import RerankService
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import build_session_cache
@@ -29,13 +28,15 @@ def get_recommend_service() -> RecommendService:
         retrieval_service=RetrievalService(
             repository=repository,
             base_pool_hours=settings.base_pool_hours,
-            path_a_hours=settings.path_a_hours,
-            path_b_hours=settings.path_b_hours,
-            path_a_limit=settings.path_a_candidate_limit,
-            path_b_limit=settings.path_b_candidate_limit,
+            onboarding_hours=settings.onboarding_hours,
+            behavior_hours=settings.behavior_hours,
+            breaking_hours=settings.breaking_hours,
+            breaking_stale_cutoff_minutes=settings.breaking_stale_cutoff_minutes,
+            onboarding_limit=settings.onboarding_candidate_limit,
+            behavior_limit=settings.behavior_candidate_limit,
+            breaking_limit=settings.breaking_candidate_limit,
             blocked_domains=settings.blocked_domains,
         ),
-        rerank_service=RerankService(),
     )
 
 
