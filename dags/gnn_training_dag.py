@@ -42,7 +42,7 @@ default_args = {
             type="string", format="date", description="학습할 데이터 날짜"
         ),
         "gate_threshold": Param(
-            default=0.25,
+            default=0.24,
             type="number",
             description="Promote to candidate if holdout_final_final_score > threshold"
         )
