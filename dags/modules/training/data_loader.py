@@ -4,6 +4,8 @@ import torch
 import s3fs
 import pickle
 import math
+import copy
+from datetime import datetime, timezone
 import torch_geometric.transforms as T
 from torch_geometric.transforms import RandomLinkSplit
 from collections import defaultdict
@@ -253,8 +255,220 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
     return data, name_to_idx_map, fs
 
 
-def preprocess_data(data, val_ratio=0.1, test_ratio=0.1):
+def _parse_date_to_unix_eod(date_str):
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    dt = dt.replace(hour=23, minute=59, second=59, microsecond=0)
+    return int(dt.timestamp())
+
+
+def _resolve_temporal_boundaries(pub_ts, policy, val_ratio, test_ratio, train_end_date=None, val_end_date=None):
+    if policy == "date":
+        if not train_end_date or not val_end_date:
+            raise ValueError("temporal split(date policy) requires train_end_date and val_end_date")
+        train_end_ts = _parse_date_to_unix_eod(train_end_date)
+        val_end_ts = _parse_date_to_unix_eod(val_end_date)
+        if train_end_ts >= val_end_ts:
+            raise ValueError("train_end_date must be earlier than val_end_date")
+        return train_end_ts, val_end_ts
+
+    if policy != "ratio":
+        raise ValueError(f"Unsupported split_policy: {policy}")
+
+    if val_ratio < 0 or test_ratio < 0 or (val_ratio + test_ratio) >= 1:
+        raise ValueError("val_ratio/test_ratio are invalid for temporal ratio split")
+
+    sorted_ts = torch.sort(pub_ts).values
+    n = sorted_ts.numel()
+    if n == 0:
+        raise ValueError("news.pub_ts is empty")
+
+    train_end_idx = max(0, min(n - 1, int((1.0 - val_ratio - test_ratio) * n) - 1))
+    val_end_idx = max(train_end_idx, min(n - 1, int((1.0 - test_ratio) * n) - 1))
+    train_end_ts = int(sorted_ts[train_end_idx].item())
+    val_end_ts = int(sorted_ts[val_end_idx].item())
+    return train_end_ts, val_end_ts
+
+
+def _sample_negative_edges(num_src, num_dst, positive_edge_index, num_neg, generator):
+    if num_neg <= 0 or num_src <= 0 or num_dst <= 0:
+        return torch.empty((2, 0), dtype=torch.long)
+
+    pos_pairs = set((int(s), int(d)) for s, d in positive_edge_index.t().tolist())
+    neg_pairs = set()
+    max_trials = max(num_neg * 20, 1000)
+    trials = 0
+
+    while len(neg_pairs) < num_neg and trials < max_trials:
+        s = int(torch.randint(0, num_src, (1,), generator=generator).item())
+        d = int(torch.randint(0, num_dst, (1,), generator=generator).item())
+        pair = (s, d)
+        if pair not in pos_pairs and pair not in neg_pairs:
+            neg_pairs.add(pair)
+        trials += 1
+
+    if not neg_pairs:
+        return torch.empty((2, 0), dtype=torch.long)
+
+    src = [p[0] for p in neg_pairs]
+    dst = [p[1] for p in neg_pairs]
+    return torch.tensor([src, dst], dtype=torch.long)
+
+
+def _build_edge_labels(pos_edge_index, full_positive_edge_index, num_src, num_dst, negative_ratio, generator):
+    num_pos = int(pos_edge_index.size(1))
+    num_neg = int(round(num_pos * float(negative_ratio)))
+    neg_edge_index = _sample_negative_edges(
+        num_src=num_src,
+        num_dst=num_dst,
+        positive_edge_index=full_positive_edge_index,
+        num_neg=num_neg,
+        generator=generator,
+    )
+
+    if num_pos == 0 and neg_edge_index.size(1) == 0:
+        return torch.empty((2, 0), dtype=torch.long), torch.empty((0,), dtype=torch.float)
+
+    edge_label_index = pos_edge_index
+    edge_label = torch.ones(num_pos, dtype=torch.float)
+
+    if neg_edge_index.size(1) > 0:
+        edge_label_index = torch.cat([edge_label_index, neg_edge_index], dim=1)
+        edge_label = torch.cat([edge_label, torch.zeros(neg_edge_index.size(1), dtype=torch.float)], dim=0)
+
+    return edge_label_index, edge_label
+
+
+def temporal_link_split(
+    data,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    split_policy="date",
+    train_end_date=None,
+    val_end_date=None,
+    negative_ratio=1.0,
+    seed=42,
+    temporal_message_passing="full_graph",
+):
+    print("✂️ [DataLoader] Temporal Splitting Dataset...", flush=True)
+
+    target_edge_types = [('news', 'has_keyword', 'keyword'), ('news', 'has_stock', 'stock')]
+    rev_edge_types = [('keyword', 'rev_has_keyword', 'news'), ('stock', 'rev_has_stock', 'news')]
+
+    if not hasattr(data['news'], 'pub_ts'):
+        raise ValueError("Temporal split requires data['news'].pub_ts. Rebuild trainset with updated graph_builder.")
+
+    pub_ts = data['news'].pub_ts.cpu().long()
+    train_end_ts, val_end_ts = _resolve_temporal_boundaries(
+        pub_ts=pub_ts,
+        policy=split_policy,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        train_end_date=train_end_date,
+        val_end_date=val_end_date,
+    )
+    print(f"   - temporal boundaries: train<= {train_end_ts}, val<= {val_end_ts}, test> {val_end_ts}", flush=True)
+
+    train_data = copy.deepcopy(data)
+    val_data = copy.deepcopy(data)
+    test_data = copy.deepcopy(data)
+
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+
+    for et, rev_et in zip(target_edge_types, rev_edge_types):
+        src_type, _, dst_type = et
+        full_edge_index = data[et].edge_index.cpu()
+        src_news_idx = full_edge_index[0]
+        edge_ts = pub_ts[src_news_idx]
+
+        train_mask = edge_ts <= train_end_ts
+        val_mask = (edge_ts > train_end_ts) & (edge_ts <= val_end_ts)
+        test_mask = edge_ts > val_end_ts
+
+        train_pos = full_edge_index[:, train_mask]
+        val_pos = full_edge_index[:, val_mask]
+        test_pos = full_edge_index[:, test_mask]
+
+        # Train split은 항상 train edge만으로 message passing
+        train_data[et].edge_index = train_pos
+        train_data[rev_et].edge_index = torch.stack([train_pos[1], train_pos[0]], dim=0)
+
+        # Val/Test message passing 범위는 config로 선택
+        if temporal_message_passing == "train_only":
+            val_data[et].edge_index = train_pos
+            val_data[rev_et].edge_index = torch.stack([train_pos[1], train_pos[0]], dim=0)
+            test_data[et].edge_index = train_pos
+            test_data[rev_et].edge_index = torch.stack([train_pos[1], train_pos[0]], dim=0)
+        elif temporal_message_passing != "full_graph":
+            raise ValueError(f"Unsupported temporal_message_passing: {temporal_message_passing}")
+
+        num_src = int(data[src_type].num_nodes)
+        num_dst = int(data[dst_type].num_nodes)
+
+        train_edge_label_index, train_edge_label = _build_edge_labels(
+            pos_edge_index=train_pos,
+            full_positive_edge_index=full_edge_index,
+            num_src=num_src,
+            num_dst=num_dst,
+            negative_ratio=negative_ratio,
+            generator=generator,
+        )
+        val_edge_label_index, val_edge_label = _build_edge_labels(
+            pos_edge_index=val_pos,
+            full_positive_edge_index=full_edge_index,
+            num_src=num_src,
+            num_dst=num_dst,
+            negative_ratio=negative_ratio,
+            generator=generator,
+        )
+        test_edge_label_index, test_edge_label = _build_edge_labels(
+            pos_edge_index=test_pos,
+            full_positive_edge_index=full_edge_index,
+            num_src=num_src,
+            num_dst=num_dst,
+            negative_ratio=negative_ratio,
+            generator=generator,
+        )
+
+        train_data[et].edge_label_index = train_edge_label_index
+        train_data[et].edge_label = train_edge_label
+        val_data[et].edge_label_index = val_edge_label_index
+        val_data[et].edge_label = val_edge_label
+        test_data[et].edge_label_index = test_edge_label_index
+        test_data[et].edge_label = test_edge_label
+
+        print(
+            f"   [{et}] train/val/test positives = "
+            f"{train_pos.size(1)}/{val_pos.size(1)}/{test_pos.size(1)}",
+            flush=True
+        )
+
+    return (train_data, val_data, test_data), target_edge_types
+
+
+def preprocess_data(data, val_ratio=0.1, test_ratio=0.1, config=None):
     print("✂️ [DataLoader] Splitting Dataset...", flush=True)
+
+    if config is None:
+        config = {}
+    training_conf = config.get('training', {})
+
+    split_mode = training_conf.get('split_mode', 'random')
+    val_ratio = training_conf.get('val_ratio', val_ratio)
+    test_ratio = training_conf.get('test_ratio', test_ratio)
+
+    if split_mode == "temporal":
+        return temporal_link_split(
+            data=data,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            split_policy=training_conf.get('split_policy', 'date'),
+            train_end_date=training_conf.get('train_end_date'),
+            val_end_date=training_conf.get('val_end_date'),
+            negative_ratio=training_conf.get('negative_ratio', 1.0),
+            seed=training_conf.get('seed', 42),
+            temporal_message_passing=training_conf.get('temporal_message_passing', 'full_graph'),
+        )
 
     target_edge_types = [('news', 'has_keyword', 'keyword'), ('news', 'has_stock', 'stock')]
     rev_edge_types = [('keyword', 'rev_has_keyword', 'news'), ('stock', 'rev_has_stock', 'news')]
@@ -267,5 +481,5 @@ def preprocess_data(data, val_ratio=0.1, test_ratio=0.1):
         edge_types=target_edge_types,
         rev_edge_types=rev_edge_types,
     )
-    
+
     return transform(data), target_edge_types

@@ -86,7 +86,8 @@ def run_graph_building(target_date, paths, aws_info, db_info):  # 🟢 db_info �
     df_news = df_news.sort_values('pub_date').reset_index(drop=True)
     df_news['news_idx'] = df_news.index
     news_map = dict(zip(df_news['news_id'], df_news['news_idx']))
-    news_meta = {}  # Title 등 필요 시 추가
+    # news_id -> pub_date(ISO8601)
+    news_meta = dict(zip(df_news['news_id'], df_news['pub_date'].dt.strftime('%Y-%m-%dT%H:%M:%S')))
 
     # (2) Keyword (이제 keyword_id는 DB의 PK입니다)
     df_kw = df_kw.reset_index(drop=True)
@@ -117,6 +118,8 @@ def run_graph_building(target_date, paths, aws_info, db_info):  # 🟢 db_info �
     data['news'].x = torch.tensor(np.vstack(df_news['news_embedding'].values), dtype=torch.float)
     data['keyword'].x = torch.tensor(np.vstack(df_kw['vector'].values), dtype=torch.float)
     data['stock'].x = torch.tensor(np.vstack(df_st['summary_embedding'].values), dtype=torch.float)
+    # Temporal split용 뉴스 발행시각(Unix seconds)
+    data['news'].pub_ts = torch.tensor((df_news['pub_date'].astype('int64') // 10**9).to_numpy(), dtype=torch.long)
 
     data['news'].num_nodes = len(df_news)
     data['keyword'].num_nodes = len(df_kw)

@@ -5,7 +5,6 @@ import os
 import pickle
 import mlflow
 import traceback
-import copy
 import re
 from torch.optim import Adam
 
@@ -60,7 +59,8 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
         (train_data, val_data, test_data), target_edge_types = preprocess_data(
             raw_data,
             val_ratio=config['training'].get('val_ratio', 0.1),
-            test_ratio=config['training'].get('test_ratio', 0.1)
+            test_ratio=config['training'].get('test_ratio', 0.1),
+            config=config,
         )
 
         # 4. 모델 설정
@@ -80,7 +80,6 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
         # Criterion은 InfoNCE 내부에서 계산하므로 외부 선언 불필요 (engine.py 참조)
 
         train_data = train_data.to(device)
-        val_data = val_data.to(device)
 
         # 5. MLflow Experiment 설정
         mlflow_conf = config.get('mlflow', {})
@@ -129,6 +128,9 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             implicit_sample_limit = config['training'].get('implicit_sample_limit', 500)
             holdout_metrics = {}
             best_state = None
+
+            def _state_dict_to_cpu(module):
+                return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
             
             def _filter_core_metrics(metrics_dict):
                 core_keys = {
@@ -169,22 +171,24 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
                 # 평가 주기 (10 에폭마다 or 마지막 에폭)
                 if epoch % 10 == 0 or epoch == EPOCHS:
-                    
-                    # 마지막 에폭인 경우에만 무거운 평가(Implicit Eval) 수행
-                    is_last_epoch = (epoch == EPOCHS)
-                    
                     # [변경] k 값 전달
-                    metrics = evaluate(
-                        model, 
-                        val_data, 
-                        target_edge_types, 
-                        k=eval_k, 
-                        eval_implicit=False,
-                        split_prefix="val",
-                        implicit_seed=implicit_seed,
-                        implicit_sample_limit=implicit_sample_limit,
-                        compute_final_score=False,
-                    )
+                    val_data_gpu = val_data.to(device)
+                    try:
+                        metrics = evaluate(
+                            model,
+                            val_data_gpu,
+                            target_edge_types,
+                            k=eval_k,
+                            eval_implicit=False,
+                            split_prefix="val",
+                            implicit_seed=implicit_seed,
+                            implicit_sample_limit=implicit_sample_limit,
+                            compute_final_score=False,
+                        )
+                    finally:
+                        del val_data_gpu
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     
                     
                     # Golden Set 평가
@@ -215,18 +219,18 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                         if best_metric is None:
                             best_metric = current_metric
                             best_epoch = epoch
-                            best_state = copy.deepcopy(model.state_dict())
+                            best_state = _state_dict_to_cpu(model)
                         else:
                             if selection_mode == 'min':
                                 if current_metric < best_metric:
                                     best_metric = current_metric
                                     best_epoch = epoch
-                                    best_state = copy.deepcopy(model.state_dict())
+                                    best_state = _state_dict_to_cpu(model)
                             else:
                                 if current_metric > best_metric:
                                     best_metric = current_metric
                                     best_epoch = epoch
-                                    best_state = copy.deepcopy(model.state_dict())
+                                    best_state = _state_dict_to_cpu(model)
                 else:
                     mlflow.log_metric("loss", loss, step=epoch)
                     for k, v in train_stats.items():
@@ -234,36 +238,42 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
             # 7. Holdout 평가 (Best + Final Checkpoint)
             if best_state is None:
-                best_state = copy.deepcopy(model.state_dict())
+                best_state = _state_dict_to_cpu(model)
                 best_epoch = EPOCHS
-            final_state = copy.deepcopy(model.state_dict())
+            final_state = _state_dict_to_cpu(model)
             model.load_state_dict(best_state)
-            holdout_metrics = evaluate(
-                model,
-                test_data.to(device),
-                target_edge_types,
-                k=eval_k,
-                eval_implicit=True,
-                split_prefix="holdout",
-                implicit_seed=implicit_seed,
-                implicit_sample_limit=implicit_sample_limit,
-                compute_final_score=True,
-            )
-            mlflow.log_metrics(_filter_core_metrics(holdout_metrics), step=best_epoch)
-            model.load_state_dict(final_state)
+            test_data_gpu = test_data.to(device)
+            try:
+                holdout_metrics = evaluate(
+                    model,
+                    test_data_gpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                )
+                mlflow.log_metrics(_filter_core_metrics(holdout_metrics), step=best_epoch)
+                model.load_state_dict(final_state)
 
-            final_holdout_metrics = evaluate(
-                model,
-                test_data.to(device),
-                target_edge_types,
-                k=eval_k,
-                eval_implicit=True,
-                split_prefix="holdout_final",
-                implicit_seed=implicit_seed,
-                implicit_sample_limit=implicit_sample_limit,
-                compute_final_score=True,
-            )
-            mlflow.log_metrics(_filter_core_metrics(final_holdout_metrics), step=EPOCHS)
+                final_holdout_metrics = evaluate(
+                    model,
+                    test_data_gpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_final",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                )
+                mlflow.log_metrics(_filter_core_metrics(final_holdout_metrics), step=EPOCHS)
+            finally:
+                del test_data_gpu
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # 8. 결과 저장 (Weights & Embeddings)
             print("💾 Saving Model & Embeddings...", flush=True)
@@ -274,10 +284,20 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             # 임베딩 생성 (학습 완료된 모델로 전체 추론)
             model.eval()
             with torch.no_grad():
+                # train graph tensor가 GPU에 상주 중이면 임베딩 추론 전에 해제
+                del train_data
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 full_gpu = raw_data.to(device)
-                emb = model.encoder(full_gpu.x_dict, full_gpu.edge_index_dict)
-            
-            emb_cpu = {k: v.cpu().numpy() for k, v in emb.items()}
+                emb_gpu = model.encoder(full_gpu.x_dict, full_gpu.edge_index_dict)
+
+            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_gpu.items()}
+            del emb_gpu
+            del full_gpu
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            emb_cpu = {k: v.numpy() for k, v in emb_tensor_cpu.items()}
             local_emb_path = "/tmp/node_embeddings.pkl"
             with open(local_emb_path, 'wb') as f: pickle.dump(emb_cpu, f)
             mlflow.log_artifact(local_emb_path)
@@ -292,7 +312,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
             # Gold keyword/stock cosine similarity report
             report = build_gold_similarity_report(
-                emb,
+                emb_tensor_cpu,
                 golden_cases,
                 name_to_idx_map,
                 edge_index_dict=raw_data.edge_index_dict,
@@ -311,6 +331,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             if os.path.exists(local_emb_path): os.remove(local_emb_path)
             if os.path.exists("/tmp/node_mapping.pkl"): os.remove("/tmp/node_mapping.pkl")
             if os.path.exists("/tmp/gold_similarity.txt"): os.remove("/tmp/gold_similarity.txt")
+            del emb_tensor_cpu
 
             # Run summary
             if best_metric is not None:
