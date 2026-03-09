@@ -20,6 +20,7 @@ class RecommendNewsItem(BaseModel):
 class RecommendNewsMeta(BaseModel):
     source: str
     fallback_used: bool
+    fallback_reason: str | None = None
 
 
 class RecommendNewsResponse(BaseModel):
