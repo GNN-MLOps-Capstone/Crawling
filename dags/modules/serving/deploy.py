@@ -147,6 +147,23 @@ def run_deploy(artifact_info, aws_info, db_info):
         conn_pg.commit()
         # Promote deployed run to product after DB commit succeeds.
         deployed_at = datetime.now(timezone.utc).isoformat()
+        current_run_id = selected_run.info.run_id
+        current_version = version
+
+        current_product_runs = client.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string="attributes.status = 'FINISHED' and tags.status = 'product'",
+            order_by=["attributes.start_time DESC"],
+            max_results=100,
+        )
+        for product_run in current_product_runs:
+            if product_run.info.run_id == current_run_id:
+                continue
+            client.set_tag(product_run.info.run_id, "status", "legacy")
+            client.set_tag(product_run.info.run_id, "replaced_by_run_id", current_run_id)
+            client.set_tag(product_run.info.run_id, "replaced_by_version", current_version)
+            client.set_tag(product_run.info.run_id, "replaced_at_utc", deployed_at)
+
         client.set_tag(selected_run.info.run_id, "status", "product")
         client.set_tag(selected_run.info.run_id, "deployed_from_status", target_status)
         client.set_tag(selected_run.info.run_id, "deployed_by", "graph_to_db")
