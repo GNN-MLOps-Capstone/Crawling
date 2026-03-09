@@ -223,6 +223,7 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
     # 4. 매핑 정보 로드
     mapping_path = path.replace("hetero_graph.pt", "node_mapping.pkl")
     name_to_idx_map = {}
+    serving_mapping = {}
     
     try:
         full_map_path = f"silver/{mapping_path}"
@@ -230,11 +231,16 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
             with fs.open(full_map_path, 'rb') as f:
                 full_mappings = pickle.load(f)
             
+            if 'news' in full_mappings:
+                serving_mapping['news'] = full_mappings['news']
+
             for entity_type, mapping_tensor in zip(['keyword', 'stock'], [keyword_mapping, stock_mapping]):
                 if entity_type in full_mappings:
                     name_to_idx_map[entity_type] = {}
                     original_map = full_mappings[entity_type].get('id_to_idx', {})
                     meta_map = full_mappings[entity_type].get('meta', {})
+                    filtered_id_to_idx = {}
+                    filtered_meta = {}
                     
                     for real_id, old_idx in original_map.items():
                         if old_idx < len(mapping_tensor):
@@ -242,17 +248,26 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
                             if new_idx != -1:
                                 display_name = meta_map.get(real_id, str(real_id))
                                 name_to_idx_map[entity_type][display_name] = new_idx
+                                filtered_id_to_idx[real_id] = new_idx
+                                filtered_meta[real_id] = display_name
+
+                    serving_mapping[entity_type] = {
+                        'id_to_idx': filtered_id_to_idx,
+                        'meta': filtered_meta,
+                    }
                     
                     print(f"   - Updated {entity_type} map size: {len(name_to_idx_map[entity_type])}")
 
         else:
             name_to_idx_map = None
+            serving_mapping = None
             
     except Exception as e:
         print(f"⚠️ Mapping load failed: {e}")
         name_to_idx_map = None
+        serving_mapping = None
 
-    return data, name_to_idx_map, fs
+    return data, name_to_idx_map, fs, serving_mapping
 
 
 def _parse_date_to_unix_eod(date_str):

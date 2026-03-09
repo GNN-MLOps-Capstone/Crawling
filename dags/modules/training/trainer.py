@@ -48,9 +48,13 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
         
         # 1. 데이터 로드 (캐시가 있으면 사용, 없으면 로드)
         if raw_data_cache:
-            raw_data, name_to_idx_map, fs = raw_data_cache
+            if len(raw_data_cache) == 4:
+                raw_data, name_to_idx_map, fs, serving_mapping = raw_data_cache
+            else:
+                raw_data, name_to_idx_map, fs = raw_data_cache
+                serving_mapping = None
         else:
-            raw_data, name_to_idx_map, fs = load_data_from_s3(trainset_path, aws_info, config=config)
+            raw_data, name_to_idx_map, fs, serving_mapping = load_data_from_s3(trainset_path, aws_info, config=config)
 
         # 2. Golden Case 로드
         golden_cases = load_json_file('golden_cases.json')
@@ -304,11 +308,12 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
             # Node mapping도 동일 run의 artifact로 보관해 serving 단계에서 동일 버전 참조
             local_mapping_path = "/tmp/node_mapping.pkl"
-            mapping_s3_path = f"silver/{str(trainset_path).replace('hetero_graph.pt', 'node_mapping.pkl')}"
-            if fs.exists(mapping_s3_path):
-                with fs.open(mapping_s3_path, 'rb') as f_in, open(local_mapping_path, 'wb') as f_out:
-                    f_out.write(f_in.read())
+            if serving_mapping:
+                with open(local_mapping_path, 'wb') as f_out:
+                    pickle.dump(serving_mapping, f_out)
                 mlflow.log_artifact(local_mapping_path)
+            else:
+                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.", flush=True)
 
             # Gold keyword/stock cosine similarity report
             report = build_gold_similarity_report(
