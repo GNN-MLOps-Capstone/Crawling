@@ -4,20 +4,60 @@ from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from app.core.config import settings
 from app.api.recommend import get_recommend_service
 from app.main import app
 from app.repositories.news_repository import NewsCandidate
+from app.schemas.recommend import RecommendNewsRequest
 from app.services.context_builder import RecommendContextBuilder
-from app.services.rerank_service import RerankService
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import InMemorySessionCache
 
 
 class FakeNewsRepository:
-    def __init__(self, news_ids: list[int]) -> None:
+    def __init__(
+        self,
+        news_ids: list[int],
+        *,
+        profiles_by_user_id: dict[int, dict[str, list[str]]] | None = None,
+        actions_by_user_id: dict[int, list[dict[str, object]]] | None = None,
+    ) -> None:
         self.news_ids = news_ids
+        self.profiles_by_user_id = profiles_by_user_id or {}
+        self.actions_by_user_id = actions_by_user_id or {}
+        self.news_entities_by_id: dict[int, dict[str, list[str]]] = {}
+        self.entity_embeddings: dict[tuple[str, str], list[float]] = {}
+        self.fetch_recent_candidates_calls: list[dict[str, object]] = []
+
+    def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:
+        return self.profiles_by_user_id.get(user_id, {})
+
+    def fetch_recent_actions(
+        self,
+        *,
+        user_id: int,
+        limit: int,
+        dwell_threshold_seconds: int,
+    ) -> list[dict[str, object]]:
+        del dwell_threshold_seconds
+        return self.actions_by_user_id.get(user_id, [])[:limit]
+
+    def fetch_news_entities(self, *, news_ids: list[int]) -> dict[int, dict[str, list[str]]]:
+        return {
+            news_id: self.news_entities_by_id.get(news_id, {"keyword_ids": [], "stock_ids": []})
+            for news_id in news_ids
+        }
+
+    def fetch_entity_embeddings(
+        self,
+        *,
+        entity_refs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], list[float]]:
+        return {
+            entity_ref: self.entity_embeddings[entity_ref]
+            for entity_ref in entity_refs
+            if entity_ref in self.entity_embeddings
+        }
 
     def fetch_latest_news_ids(self, *, limit: int, offset: int) -> list[int]:
         return self.news_ids[offset : offset + limit]
@@ -28,9 +68,19 @@ class FakeNewsRepository:
         limit: int,
         hours: int,
         exclude_ids: set[int],
+        stale_cutoff_minutes: int | None = None,
         blocked_domains: tuple[str, ...] = (),
-        ) -> list[NewsCandidate]:
-        del hours, blocked_domains
+    ) -> list[NewsCandidate]:
+        self.fetch_recent_candidates_calls.append(
+            {
+                "limit": limit,
+                "hours": hours,
+                "exclude_ids": set(exclude_ids),
+                "stale_cutoff_minutes": stale_cutoff_minutes,
+                "blocked_domains": blocked_domains,
+            }
+        )
+        del blocked_domains, stale_cutoff_minutes
         candidates: list[NewsCandidate] = []
         now = datetime.utcnow()
         for index, news_id in enumerate(self.news_ids):
@@ -58,14 +108,17 @@ class PathBOnlyRepository(FakeNewsRepository):
         limit: int,
         hours: int,
         exclude_ids: set[int],
+        stale_cutoff_minutes: int | None = None,
         blocked_domains: tuple[str, ...] = (),
     ) -> list[NewsCandidate]:
+        del stale_cutoff_minutes
         if hours > 2:
-            raise RuntimeError("path a failed")
+            raise RuntimeError("primary path failed")
         return super().fetch_recent_candidates(
             limit=limit,
             hours=hours,
             exclude_ids=exclude_ids,
+            stale_cutoff_minutes=None,
             blocked_domains=blocked_domains,
         )
 
@@ -83,12 +136,14 @@ def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
         retrieval_service=RetrievalService(
             repository=repository,
             base_pool_hours=72,
-            path_a_hours=72,
-            path_b_hours=2,
-            path_a_limit=50,
-            path_b_limit=30,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=50,
+            behavior_limit=50,
+            breaking_limit=30,
         ),
-        rerank_service=RerankService(),
     )
     app.dependency_overrides[get_recommend_service] = lambda: service
     return TestClient(app)
@@ -139,19 +194,19 @@ def test_pagination_consistency_with_cursor() -> None:
     assert body2["request_id"] == body1["request_id"]
 
 
-def test_response_contains_phase1a_meta_fields() -> None:
+def test_response_contains_multipath_meta_fields() -> None:
     client = _client_with_ids([21, 20, 19, 18])
 
     response = client.post("/recommend/news", json={"user_id": "u1", "limit": 2, "context": {}})
 
     assert response.status_code == 200
     meta = response.json()["meta"]
-    assert meta["source"] == "phase1a_hybrid"
+    assert meta["source"] == "multipath_cold"
     assert meta["fallback_used"] is False
-    assert meta["fallback_reason"] is None
+    assert meta["fallback_reason"] == "user_signal_lookup_failed"
 
 
-def test_path_a_failure_falls_back_to_path_b() -> None:
+def test_primary_failure_falls_back_to_breaking() -> None:
     client = _client_with_repository(PathBOnlyRepository([21, 20, 19, 18]))
 
     response = client.post("/recommend/news", json={"user_id": "u1", "limit": 2, "context": {}})
@@ -160,31 +215,276 @@ def test_path_a_failure_falls_back_to_path_b() -> None:
     body = response.json()
     assert [item["news_id"] for item in body["items"]] == [21, 20]
     assert body["meta"]["fallback_used"] is True
-    assert body["meta"]["fallback_reason"] == "path_a_failed_use_path_b"
+    assert body["meta"]["fallback_reason"] == "primary_failed_use_breaking"
 
 
-def test_gemini_provider_without_api_key_falls_back() -> None:
-    original_provider = settings.rerank_provider
-    original_api_key = settings.gemini_api_key
-    object.__setattr__(settings, "rerank_provider", "gemini")
-    object.__setattr__(settings, "gemini_api_key", None)
-    try:
-        service = RerankService()
-        result = service.rerank(
-            context=RecommendContextBuilder().build({}),
-            candidates=[
-                NewsCandidate(
-                    news_id=1,
-                    title="title-1",
-                    pub_date=datetime.utcnow(),
-                    url="https://example.com/1",
-                    category="unknown",
-                    domain="example.com",
-                )
-            ],
+def test_behavior_path_activates_when_recent_actions_exist() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [30, 29, 28, 27, 26, 25],
+            profiles_by_user_id={1: {"stock_ids": ["005930"]}},
+            actions_by_user_id={
+                1: [
+                    {"news_id": 999, "timestamp": "2026-03-09T00:00:00+00:00", "keyword_ids": ["11"]},
+                    {"news_id": 998, "timestamp": "2026-03-09T01:00:00+00:00", "stock_ids": ["005930"]},
+                ]
+            },
         )
-        assert result.fallback_used is True
-        assert result.fallback_reason == "llm_rerank_failed"
-    finally:
-        object.__setattr__(settings, "rerank_provider", original_provider)
-        object.__setattr__(settings, "gemini_api_key", original_api_key)
+    )
+
+    response = client.post(
+        "/recommend/news",
+        json={
+            "user_id": "1",
+            "limit": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["news_id"] for item in body["items"]] == [30, 29, 28, 27]
+    assert body["meta"]["source"] == "multipath_warm"
+
+
+def test_single_recent_action_is_not_enough_for_warm_behavior_path() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [30, 29, 28, 27, 26, 25],
+            actions_by_user_id={1: [{"news_id": 999, "timestamp": "2026-03-09T00:00:00+00:00", "keyword_ids": ["11"]}]},
+        )
+    )
+
+    response = client.post(
+        "/recommend/news",
+        json={
+            "user_id": "1",
+            "limit": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["source"] == "multipath_cold"
+    assert body["meta"]["fallback_reason"] == "behavior_insufficient"
+
+
+def test_context_override_still_works_for_debug_requests() -> None:
+    client = _client_with_ids([30, 29, 28, 27, 26, 25])
+
+    response = client.post(
+        "/recommend/news",
+        json={
+            "user_id": "u1",
+            "limit": 4,
+            "context": {
+                "profile": {"interests": ["stocks"]},
+                "recent_actions": [
+                    {"news_id": 999, "timestamp": "2026-03-09T00:00:00+00:00", "keyword_ids": ["11"]},
+                    {"news_id": 998, "timestamp": "2026-03-09T01:00:00+00:00", "stock_ids": ["005930"]},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["news_id"] for item in body["items"]] == [30, 29, 28, 27]
+    assert body["meta"]["source"] == "multipath_warm"
+
+
+def test_onboarding_personalized_scoring_reorders_candidates() -> None:
+    repository = FakeNewsRepository(
+        [101, 102, 103],
+        profiles_by_user_id={1: {"stock_ids": ["005930"], "keyword_ids": ["7"]}},
+    )
+    repository.news_entities_by_id = {
+        101: {"stock_ids": ["000660"], "keyword_ids": ["8"]},
+        102: {"stock_ids": ["005930"], "keyword_ids": ["7"]},
+        103: {"stock_ids": ["000270"], "keyword_ids": ["9"]},
+    }
+    repository.entity_embeddings = {
+        ("stock", "005930"): [1.0, 0.0],
+        ("keyword", "7"): [0.0, 1.0],
+        ("stock", "000660"): [0.7, 0.3],
+        ("keyword", "8"): [0.2, 0.5],
+        ("stock", "000270"): [0.0, 1.0],
+        ("keyword", "9"): [0.1, 0.2],
+    }
+    client = _client_with_repository(repository)
+
+    response = client.post("/recommend/news", json={"user_id": "1", "limit": 3})
+
+    assert response.status_code == 200
+    assert [item["news_id"] for item in response.json()["items"]] == [102, 101, 103]
+
+
+def test_behavior_personalized_scoring_uses_recent_action_entities() -> None:
+    repository = FakeNewsRepository(
+        [201, 202, 203],
+        actions_by_user_id={
+            1: [
+                {
+                    "news_id": 9001,
+                    "timestamp": "2026-03-09T00:00:00+00:00",
+                    "keyword_ids": ["11"],
+                    "stock_ids": ["035420"],
+                },
+                {
+                    "news_id": 9002,
+                    "timestamp": "2026-03-09T01:00:00+00:00",
+                    "keyword_ids": ["11"],
+                    "stock_ids": ["035420"],
+                },
+            ]
+        },
+    )
+    repository.news_entities_by_id = {
+        201: {"stock_ids": ["005930"], "keyword_ids": ["12"]},
+        202: {"stock_ids": ["035420"], "keyword_ids": ["11"]},
+        203: {"stock_ids": ["000660"], "keyword_ids": ["13"]},
+    }
+    repository.entity_embeddings = {
+        ("keyword", "11"): [0.0, 1.0],
+        ("stock", "035420"): [1.0, 0.0],
+        ("keyword", "12"): [0.1, 0.1],
+        ("stock", "005930"): [0.1, 0.2],
+        ("keyword", "13"): [-1.0, 0.0],
+        ("stock", "000660"): [0.0, -1.0],
+    }
+    retrieval_service = RetrievalService(
+        repository=repository,
+        base_pool_hours=72,
+        onboarding_hours=72,
+        behavior_hours=72,
+        breaking_hours=2,
+        breaking_stale_cutoff_minutes=120,
+        onboarding_limit=50,
+        behavior_limit=50,
+        breaking_limit=30,
+    )
+    context = RecommendContextBuilder().build(
+        user_id="1",
+        raw_context={},
+        repository=repository,
+    )
+    behavior_pool = repository.fetch_recent_candidates(
+        limit=3,
+        hours=72,
+        exclude_ids=set(),
+    )
+    ranked, insufficient = retrieval_service._score_behavior_candidates(
+        candidates=behavior_pool,
+        context=context,
+        limit=3,
+    )
+
+    assert insufficient is False
+    assert [item.news_id for item in ranked] == [202, 201]
+
+
+def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
+    repository = FakeNewsRepository(
+        [301, 302, 303, 304],
+        profiles_by_user_id={1: {"stock_ids": ["005930"]}},
+        actions_by_user_id={
+            1: [{"news_id": 999, "timestamp": "2026-03-09T01:00:00+00:00", "keyword_ids": ["11"], "stock_ids": []}]
+        },
+    )
+    repository.news_entities_by_id = {
+        301: {"stock_ids": ["005930"], "keyword_ids": []},
+        302: {"stock_ids": [], "keyword_ids": ["11"]},
+        303: {"stock_ids": [], "keyword_ids": []},
+        304: {"stock_ids": [], "keyword_ids": []},
+    }
+    repository.entity_embeddings = {
+        ("stock", "005930"): [1.0, 0.0],
+        ("keyword", "11"): [0.0, 1.0],
+    }
+    retrieval_service = RetrievalService(
+        repository=repository,
+        base_pool_hours=72,
+        onboarding_hours=72,
+        behavior_hours=72,
+        breaking_hours=2,
+        breaking_stale_cutoff_minutes=120,
+        onboarding_limit=2,
+        behavior_limit=2,
+        breaking_limit=1,
+    )
+    context = RecommendContextBuilder().build(
+        user_id="1",
+        raw_context={},
+        repository=repository,
+    )
+
+    retrieval_service.retrieve(context=context, exclude_ids=set())
+
+    assert len(repository.fetch_recent_candidates_calls) == 2
+    assert repository.fetch_recent_candidates_calls[0]["hours"] == 72
+    assert repository.fetch_recent_candidates_calls[0]["limit"] == 8
+    assert repository.fetch_recent_candidates_calls[1]["hours"] == 2
+
+
+def test_replayed_cursor_returns_same_page() -> None:
+    client = _client_with_ids([10, 9, 8, 7, 6])
+
+    first = client.post("/recommend/news", json={"user_id": "u1", "limit": 2})
+    assert first.status_code == 200
+    cursor = first.json()["next_cursor"]
+    assert cursor is not None
+
+    second = client.post(
+        "/recommend/news",
+        json={"user_id": "u1", "limit": 2, "cursor": cursor},
+    )
+    assert second.status_code == 200
+
+    replay = client.post(
+        "/recommend/news",
+        json={"user_id": "u1", "limit": 2, "cursor": cursor},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["request_id"] == second.json()["request_id"]
+    assert replay.json()["items"] == second.json()["items"]
+    assert replay.json()["next_cursor"] == second.json()["next_cursor"]
+
+
+def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
+    repository = FakeNewsRepository(list(range(120, 0, -1)))
+    service = RecommendService(
+        repository=repository,
+        session_cache=InMemorySessionCache(),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=50,
+            behavior_limit=50,
+            breaking_limit=30,
+        ),
+    )
+
+    first = service.recommend_news(
+        RecommendNewsRequest(user_id="u1", limit=40, request_id="r1", context={})
+    )
+    assert first.next_cursor is not None
+    session = service.session_cache.get("r1")
+    assert session is not None
+    assert len(session.timeline_ids) == 80
+
+    second = service.recommend_news(
+        RecommendNewsRequest(user_id="u1", limit=40, cursor=first.next_cursor, context={})
+    )
+    assert second.next_cursor is not None
+    session = service.session_cache.get("r1")
+    assert session is not None
+    assert session.prefetched_timeline_ids
+
+    third = service.recommend_news(
+        RecommendNewsRequest(user_id="u1", limit=40, cursor=second.next_cursor, context={})
+    )
+    assert len(third.items) == 40
