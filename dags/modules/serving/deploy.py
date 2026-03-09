@@ -2,6 +2,7 @@ import os
 import pickle
 import psycopg2
 import mlflow
+from datetime import datetime, timezone
 from mlflow.tracking import MlflowClient
 from psycopg2.extras import execute_values
 
@@ -144,7 +145,16 @@ def run_deploy(artifact_info, aws_info, db_info):
     try:
         execute_values(cursor, insert_query, data_to_insert, page_size=1000)
         conn_pg.commit()
-        print("✅ Deployment Successful.")
+        # Promote deployed run to product after DB commit succeeds.
+        deployed_at = datetime.now(timezone.utc).isoformat()
+        client.set_tag(selected_run.info.run_id, "status", "product")
+        client.set_tag(selected_run.info.run_id, "deployed_from_status", target_status)
+        client.set_tag(selected_run.info.run_id, "deployed_by", "graph_to_db")
+        client.set_tag(selected_run.info.run_id, "deployed_at_utc", deployed_at)
+        print(
+            f"✅ Deployment Successful. run_id={selected_run.info.run_id} promoted to status=product",
+            flush=True
+        )
     except Exception as e:
         conn_pg.rollback()
         print(f"❌ DB Insert Failed: {e}")
