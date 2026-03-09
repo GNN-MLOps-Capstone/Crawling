@@ -5,21 +5,19 @@
 - 기준일: `2026-03-09`
 - 이 문서는 추천 API에서 "무엇을 구현해야 하는가"를 단계별 체크리스트로 정리한 실행 문서다.
 - 상위 목표와 아키텍처 배경은 [recommendation_api_design_draft.md](/home/dobi/Crawling/docs/recommendation_api_design_draft.md)를 기준으로 본다.
-- 1단계는 우선 `context`가 비어 있어도 Path A와 LLM이 동작하는 Retrieval + LLM 뼈대 구축과, 이후 확정된 `context` 계약을 반영한 개인화 확장으로 나눈다.
-- 2단계는 Popularity + MAB 확장으로 구분한다.
+- 현재 구현 단계는 `LLM Ranker`를 제거하고, `A1(온보딩) / A2(로그) / B(속보) / C(인기 탐색)` 구조를 기준으로 재정렬하는 것이다.
 
 ## 1. Current Baseline
 
 ### 현재 코드 상태
 
 - 엔드포인트는 `POST /recommend/news`다.
-- 현재 응답은 최신 뉴스 `news_id` 목록 중심의 mock 단계다.
-- 요청마다 DB를 직접 조회한다.
-- `context`는 아직 추천 계산에 실질적으로 반영되지 않는다.
-- pagination은 `OFFSET` 기반 cursor 방식이다.
-- cursor에는 `request_id`, `limit`, `offset`만 들어 있고, 추천 결과 리스트 자체를 캐시하지 않는다.
-- `meta.fallback_used` 필드는 있지만, 실제 정책화된 fallback 경로는 아직 없다.
-- Redis는 `docker-compose.yaml`에 정의되어 있지만 현재 추천 API 로직에는 연결되지 않았다.
+- 응답은 `news_id` 목록과 cursor를 반환한다.
+- 요청마다 세션 캐시를 우선 확인하고, miss 시 추천 세션을 새로 생성한다.
+- 추천 계산에 필요한 사용자 신호는 외부 `context`보다 `user_id` 기준 내부 조회를 기본으로 하도록 정리 중이다.
+- 현재 구현 기준 기본 동작은 `온보딩 기반 후보 + 속보 후보` 믹싱이다.
+- `로그 기반 후보(A2)`는 세션/행동 신호를 받는 구조까지 우선 반영하고, 고도화는 후속 단계로 둔다.
+- `인기 탐색 후보(C)`는 아키텍처 상 유지되지만 현재 코드에는 아직 활성화되지 않았다.
 
 ### 현재 계약
 
@@ -28,7 +26,6 @@
   - `limit`: 필수, `1 <= limit <= 100`
   - `cursor`: optional
   - `request_id`: optional
-  - `context`: optional dict, 현재 `null`은 허용하지 않음
 - 응답 필드
   - `request_id`
   - `items[].news_id`
@@ -38,323 +35,321 @@
 
 ## 2. Phase 1A Checklist
 
-1A 단계 목표는 "`context` 계약이 없어도 Path A와 LLM이 빈 입력 기준으로 동작하는 추천 서빙 뼈대"를 먼저 올리는 것이다. 이 단계에서는 `context`가 비어 있는 상태를 기본값으로 두고, 더 넓은 최신 풀을 가져오는 Path A, 더 짧은 시간창의 속보를 가져오는 Path B, LLM 적용 지점, 캐시, fallback, 로그 구조를 먼저 고정한다.
+1A 단계 목표는 "`user_id` 기반 내부 신호 조회를 전제로 `A1(온보딩)`과 `B(속보)`를 먼저 안정화하고, `C(인기 탐색)`를 이후에 붙일 수 있는 멀티 패스 서빙 뼈대"를 올리는 것이다.
 
-### 2.0 Skeleton-First Principles
+### 2.1 Progress Snapshot
 
-- [x] `context`의 실제 값보다 `context`를 받아 처리하는 계층 구조를 먼저 고정
-- [x] 추천 요청은 항상 `context builder -> retrieval -> rerank -> mix` 흐름을 타도록 유지
-- [x] `context`가 비어 있어도 같은 함수와 같은 prompt builder를 사용하도록 설계
-- [x] 온보딩 데이터와 행동 로그는 나중에 `context` 내부 포맷으로 투입할 수 있게 중간 정규화 포맷을 먼저 정의
-- [x] 1A에서는 개인화 품질보다 계약 안정성과 확장 용이성을 우선
+- 완료
+  - 추천 요청이 `context builder -> retrieval -> mix -> session cache` 흐름으로 동작한다.
+  - `POST /recommend/news` 계약, cursor pagination, 세션 캐시 기반 page slice가 유지된다.
+  - `A1(온보딩 latest baseline)`와 `B(속보)` 후보를 섞어 반환하는 기본 서빙 경로가 있다.
+  - prefetch, batch rollover, latest fallback, `A1 실패 -> B fallback`이 코드에 반영돼 있다.
+  - `user_id` 기준 내부 온보딩/행동 신호 조회 스켈레톤이 코드에 반영돼 있다.
+  - `meta.source`가 `multipath_cold` / `multipath_warm` 수준으로 구분된다.
+  - Docker 기준 추천 API 테스트가 통과했다.
+- 부분 완료
+  - 세션 구조는 이미 멀티 패스 확장을 전제로 하지만, 현재 코드 레벨 큐는 `onboarding/behavior/breaking`까지만 저장한다.
+  - 로그 필드는 남아 있지만, `impression/click -> recent_actions` 데이터 루프는 아직 닫히지 않았다.
+  - `Path C`는 설계상 유지되지만 구현과 세션 구조 반영은 아직 안 됐다.
+  - 요청 계약은 아직 `context` optional 형태를 유지하지만, 기본 경로는 `user_id` 기반 내부 조회이고 `context`는 debug override 용도로만 쓰인다.
+- 미완료
+  - 1A 완료 기준 전부를 만족하는 end-to-end 검증은 아직 아니다.
+  - `user_id -> profile/log source lookup` 뒤 personalized retrieval scoring 연결은 아직 없다.
 
-### 2.1 API Contract And Session
-
-1A 구현 기준 기본 동작은 다음과 같다.
-- `context`가 비어 있으면 `context builder`는 최신성 seed와 기본 prompt slot 문구를 생성한다.
-- Path A는 최근 `3일` 최신 풀에서 후보를 만들고, rerank는 같은 prompt shape를 유지한 채 heuristic/LLM interface를 통해 실행한다.
-- Path B는 더 짧은 속보 시간창에서 별도 후보를 만들고, 추천 세션은 `request_id` 기준 캐시에 저장된다.
+### 2.2 Request Flow And Contract
 
 - [x] 기존 `POST /recommend/news` 엔드포인트 유지
 - [x] 응답 shape를 현재 계약과 호환되게 유지
-- [x] `context`는 optional로 유지하되, 비어 있어도 정상 동작하는 계약으로 정리
-- [x] `context` 미존재 시에도 Path A와 LLM이 실행되는 기본 동작을 문서화
-- [x] 추천 세션은 `request_id` 단위로 path별 queue와 served state를 캐시에 보관하는 방식으로 정의
-- [x] cursor는 캐시된 세션 상태에서 다음 page를 생성하기 위한 포인터 역할로 제한
-- [x] `context` envelope 초안 정의
-- [x] envelope는 `profile`, `recent_actions`, `session_signals` 수준의 상위 필드만 먼저 고정
-- [x] 내부 세부 필드는 비어 있거나 누락되어도 통과되도록 처리
-- [x] `meta.source` 값 체계 확정
-- [x] `meta.fallback_used`와 `fallback_reason` 노출 범위 확정
-- [x] cursor와 `request_id`의 순서 불변성 원칙 확정
+- [x] `request_id` 단위 추천 세션 생성 및 재사용
+- [x] cursor는 세션 포인터 역할로만 사용
+- [x] cursor/request_id 불일치 시 400 에러 반환
+- [x] `meta.source`, `meta.fallback_used`, `fallback_reason` 응답 유지
+- [ ] 요청 계약을 `user_id` 중심 최소 입력 형태로 정리
+- [x] 외부 `context`를 제거할지, 내부 debug override로만 남길지 결정
 
-### 2.2 Context Builder Skeleton
+### 2.3 User Signal Loading Skeleton
 
-- [x] `raw context`를 내부 추천용 구조로 변환하는 전용 builder 계층 정의
-- [x] builder는 비어 있는 입력에서도 최신순 기준 기본 seed를 반환하도록 구현
-- [x] 라우터/서비스에서 `context`를 직접 해석하지 않고 builder를 통해서만 접근하도록 정리
-- [x] 추후 온보딩 데이터, 클릭 로그, 세션 신호를 builder 입력으로 합성할 수 있게 확장 포인트 확보
+- [x] 내부적으로 `profile`, `recent_actions`, `session_signals` 정규화 구조를 유지
+- [x] `A1`과 이후 `A2`가 서로 다른 필드를 읽을 수 있게 구조 분리
+- [x] `user_id` 기준으로 온보딩 데이터 조회 경로 정의
+- [x] `user_id` 기준으로 최근 행동 로그 조회 경로 정의
+- [x] 조회 실패/데이터 없음 시 degrade 코드 체계 정의
 
-### 2.3 Base Pool And Repository Expansion
+### 2.4 Retrieval Baseline
 
-- [x] 후보 조회 결과에 `pub_date` 추가
-- [ ] 필요 시 `keyword_embedding_id` 또는 연관 조인 키 노출
-- [x] 최근 `3일` 기준 base pool 쿼리 작성
-- [x] base pool 기본 크기 확정
-- [x] 최신 기사 정렬 기준 일관성 점검
+- [x] 후보 조회 결과에 `pub_date` 포함
+- [x] 최근 `3일` 기준 base pool 유지
+- [x] 최신 기사 정렬 기준 일관성 유지
+- [x] 도메인 필터 입력을 retrieval 계층에서 받을 수 있게 유지
+- [x] 개인화 경로는 평균 풀링 대신 multi-interest 보존 방향으로 정의
+- [x] `A1`은 온보딩에서 선택한 키워드/종목 전체를 입력으로 쓰는 방향 확정
+- [x] `A2`는 최근 20개 클릭/유효 읽기 로그를 입력으로 쓰는 방향 확정
+- [x] `keyword-keyword`, `stock-stock`, `keyword-stock` pair type별 유사도 보정 필요성 확정
+- [ ] 온보딩 프로필 기반 boost 규칙은 아직 미구현
+- [ ] 내부 조회한 프로필/로그를 retrieval 입력으로 연결
 
-### 2.4 Path A. Baseline Retrieval Without Context
+### 2.5 Path A1. Onboarding Baseline
 
-- [x] 빈 `context` 기준 Path A 입력 생성 규칙 정의
-- [x] `context`가 없을 때 Path A 후보는 더 넓은 최신 풀에서 최신순 기준으로 조회하도록 고정
-- [x] Path A의 최신 풀 시간 범위와 base pool 관계 명확화
-- [x] 최신순 baseline은 이후 온보딩/로그 기반 신호가 들어와도 기본 fallback으로 유지
-- [x] 최신순 기준 후보 상한과 정렬 tie-break 규칙 구현
-- [x] Path A 후보 수를 `50`개로 고정
-- [x] seen item 필터 적용
+- [x] `profile`이 없어도 넓은 최신 풀에서 baseline 후보 생성
+- [x] A1 후보 수 상한 유지
+- [x] exclude/seen item 필터 적용
+- [x] 온보딩 입력은 선택한 키워드/종목 전체를 그대로 사용하는 방향 확정
+- [x] 벡터 매칭은 average pooling이 아니라 Max-Sim 기반으로 정의
+- [x] 종목 entity hard match 가산점 적용 방향 확정
+- [ ] pair type별 similarity calibration 구현
+- [ ] 실제 온보딩 신호를 반영한 personalized retrieval은 아직 미구현
+- [x] `watchlist(user_id, stock_id)` source 확인
+- [x] `user_onboarding_keywords(user_id, keyword_id)` source 확인
+- [x] `user_id -> onboarding source` join 구현
+- [ ] vector lookup 구현
 
-### 2.5 Path B. Breaking News Retrieval
+### 2.6 Path B. Breaking Baseline
 
-- [x] 최근 `1~2시간` 기사 추출 쿼리 구현
-- [x] Path B는 Path A보다 더 짧은 시간창의 속보 풀로 역할을 고정
-- [x] 최신성 중심 정렬 기준 확정
-- [x] stale item cut-off 확정
-- [x] Path B 후보 수를 `30`개로 고정
+- [x] 짧은 시간창의 속보 후보 조회 유지
+- [x] `stale_cutoff`를 적용할 수 있게 유지
+- [x] B 후보 수 상한 유지
+- [x] A1과 중복되지 않도록 exclude 처리
+- [x] primary path 실패 시 B 중심 fallback 지원
 
-### 2.6 LLM Reranking Skeleton
+### 2.7 Path C. Popular Exploration Skeleton
 
-- [x] 적용 대상을 초기에는 `50`개 규모의 Path A 후보 세트로 한정
-- [x] 후보 압축 포맷 정의
-- [x] 빈 `context`를 전제로 한 기본 prompt 계약 정의
-- [x] `context`가 없어도 무의미한 출력이 아니라 일반 뉴스 추천 점수가 나오도록 prompt 작성
-- [x] prompt는 `user interests`, `recent reads`, `avoidances` 같은 슬롯 구조로 먼저 설계
-- [x] 값이 없을 때는 기본 문구를 넣어 prompt shape가 크게 바뀌지 않도록 유지
-- [x] `relevance`, `novelty`, `clarity`, `final` 점수 파싱 구현
-- [x] timeout 처리 구현
-- [x] parse failure 처리 구현
-- [x] partial failure 처리 구현
-- [x] LLM 장애 시 heuristic 또는 원정렬 fallback 구현
+- [x] Path C를 정식 경로로 문서에 유지
+- [ ] popularity signal source 확정
+- [ ] recency와 category diversity를 함께 반영한 점수 정의
+- [ ] 인기 편중 방지 규칙 정의
+- [ ] 세션 캐시에 popular queue를 저장할지 구조 확정
 
-### 2.7 Fixed Mixing And Serving
+### 2.8 Session Cache And Pagination
 
-- [x] Path A와 Path B 병합 규칙 확정
-- [x] Path A는 넓은 최신성, Path B는 속보성 보강 역할로 mix 정책 문서화
-- [ ] 최종 mix는 MAB가 결정하고, 운영 문서에는 초기 prior와 guardrail만 정의
-- [x] 중복 뉴스 제거 규칙 구현
-- [x] path별 queue에서 현재 mix policy에 맞춰 page를 합성하는 규칙 확정
-- [x] 한 번 생성된 queue와 served state는 세션 동안 재계산하지 않고 캐시 결과를 우선 사용
-- [x] `meta.source` 출력 정책 반영
+- [x] 세션 캐시에 `queue`, `served_ids`, `batch_generation_id` 저장
+- [x] 다음 페이지 요청은 캐시된 timeline에서 slice
+- [x] prefetch 결과는 현재 batch 소진 전까지 본 timeline에 합치지 않음
+- [x] batch rollover 시 prefetched queue를 이어 붙임
+- [x] 필요 시 세션 재생성 fallback 지원
+- [ ] stale session 복원 정책은 아직 미정
+- [ ] Path C 활성화 시 popular queue 저장 구조 확장
 
-### 2.8 Caching, Consistency, And Fallback
+### 2.9 Mixing Baseline
 
-- [x] Redis 연결
-- [x] cache key 구조 확정
-- [x] cache value 구조 확정
-- [x] 같은 `request_id` 기준 session cache 저장
-- [x] 세션 캐시에는 `A/B/C queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`, 생성 시각, 마지막 노출 시각 저장
-- [x] 다음 페이지 요청은 DB 재조회 대신 캐시된 path queue를 이용해 page를 합성하도록 구현
-- [x] prefetch는 전체 잔량이 아니라 path별 low watermark 기준으로 트리거되도록 설계
-- [x] 1A 기본 prefetch 조건은 `Path A remaining <= 20`
-- [x] 필요 시 Path별 replenishment와 batch 전체 rollover 중 무엇을 우선할지 정책화
-- [x] 현재 batch가 완전히 소진되면 prefetch된 다음 batch 또는 보충 queue로 전환하도록 구현
-- [x] prefetch된 batch 생성 시 이미 노출한 `news_id`는 제외
-- [x] Redis 장애 시 latest fallback 구현
-- [x] 빈 `context` 상태에서도 Path A 실패 시 Path B 중심 fallback 구현
-- [ ] DB 지연 또는 실패 시 stale cache fallback 검토
+- [x] 현재 구현은 고정 mix weight 기반 병합
+- [x] path별 큐를 따로 보관하고 최종 timeline은 mix 결과로 생성
+- [x] 중복 뉴스 제거 규칙 유지
+- [x] MAB 없이도 동작하는 기본 서빙 경로 확보
+- [ ] 1A 기준 운영 guardrail 문구는 더 구체화 필요
 
-### 2.9 Logging And Evaluation Baseline
+### 2.10 Logging And Observability
 
-- 추천 로그는 별도 DB 적재 대신 애플리케이션 구조화 로그를 기준 저장 경로로 사용한다.
+- [x] request log 스키마 유지
+- [x] `latency_ms`, `cache_status`, `fallback_reason`, `batch_generation_id` 로그 유지
+- [x] path별 remaining count와 mix ratio 로그 적재
+- [x] `context_hash`, `context_present` 로그 적재
+- [ ] impression/click 로그 실제 적재 경로 검증 필요
+- [ ] `cold/warm` 분리 집계 기준은 아직 미확정
+- [ ] Path C impression/click 집계 필드 정의
 
-- [x] request log 스키마 확정
-- [x] impression log 스키마 확정
-- [x] click log 스키마 확정
-- [x] `context` 원문 전체가 아니라 정규화 결과 또는 hash 중심으로 로그 적재
-- [ ] 추후 `recent_actions`를 만들 수 있도록 request-impression-click 연결 키 유지
-- [x] `session_id` 또는 동등한 세션 식별 키 적재 여부 확정
-- [x] `latency_ms`, `cache_status`, `fallback_reason` 구조화 로그 추가
-- [x] `prefetch_triggered`, `prefetch_status`, `batch_generation_id` 로그 추가
-- [x] path별 remaining count와 prefetch trigger path 로그 추가
-- [x] `context_present` 또는 동등한 personalizable 상태 플래그 로그 추가
-- [ ] `CTR@5/10/20`, `Latency p50/p95`, `Fallback Rate` 계산 가능 여부 확인
-- [x] Path A/B mix ratio 로그 적재
+### 2.11 Validation Status
+
+- [x] 테스트 코드 기준 cursor consistency, fallback, prefetch 시나리오를 작성함
+- [x] `pytest tests/test_recommend_api.py` 실행 확인
+- [ ] FastAPI 앱 레벨 수동 확인
+- [ ] Redis 연결이 실제 로컬 환경에서 정상 동작하는지 확인
 
 ## 3. Phase 1B Checklist
 
-1B 단계 목표는 "확정된 `context` 계약을 Path A retrieval과 LLM prompt에 반영해 개인화 강도를 높이는 것"이다. 이 단계부터는 1A에서 만든 기본 Path A/LLM 뼈대를 유지한 채, `context`가 있을 때만 추가 신호와 boost를 얹고 없을 때는 1A 기본 모드로 그대로 동작하도록 확장한다.
+1B 단계 목표는 "`A2(로그 기반 추천)`를 활성화하고, warm user 대상 개인화 강도를 높이는 것"이다.
 
 ### 3.1 Context Contract Finalization
 
 - [ ] `context` 허용 필드 목록 확정
 - [ ] 필드별 optional/required 여부와 기본값 확정
 - [ ] `context` 버전 관리 또는 schema evolution 방식 결정
-- [ ] 비어 있는 `context`, 부분적으로만 채워진 `context` 처리 규칙 확정
-- [ ] `context` 검증 실패 시 degrade 정책 확정
 - [ ] 온보딩 데이터와 로그 데이터가 각각 어떤 필드로 매핑되는지 확정
 
-### 3.2 Path A. Personalized Retrieval
+### 3.2 Path A2. Behavior-Based Retrieval
 
-- [ ] 개인화 입력 파싱 규칙 확정
-- [ ] 온보딩 데이터 source 연결
-- [ ] 최근 읽은 기사 기반 입력 source 연결
-- [ ] 노출/클릭 로그를 `recent_actions` 또는 동등 구조로 집계하는 경로 확정
-- [ ] 뉴스 키워드/종목 임베딩 조회 경로 확정
-- [ ] 1A 기본 Path A 입력 위에 `context` 신호를 누적하는 방식으로 확장
-- [ ] `context` 기반 필터 또는 boost 규칙 추가
-- [ ] 유사도 기반 후보 추출 구현
-- [ ] Path A 후보 수를 `50`개로 유지
+#### Spec Locked
+
+- [x] `recent_actions`는 `user_id` 기준 최근 20개 클릭/유효 읽기 로그를 기준으로 한다
+- [x] 체류 시간 `10초` 미만 로그는 제외한다
+- [x] 유니크 키워드 단위로 집계하되 빈도 정보는 유지한다
+
+#### Implementation Checklist
+
+- [x] `user_id -> recent_actions` 조회 경로 확정
+- [x] `interaction_events`에서 `content_view/content_leave`와 `content_session`으로 읽기 세션을 복원하기로 결정
+- [ ] warm user 활성화 기준 확정
+- [x] `content_view`와 `content_leave`를 묶어 dwell time 계산 구현
+- [ ] `event_ts_client` 기준 최신성 정렬 및 decay 입력 시각 처리 구현
+- [ ] 빈도 + 최신성 decay 가중치 계산 구현
+- [ ] pair type별 similarity calibration 구현
+- [ ] Max-Sim 매칭 구현
+- [ ] 반복 등장 종목에 대한 entity hard match 구현
+- [x] `news_keyword_mapping`, `news_stock_mapping`으로 엔터티 복원 구현
+- [x] `interaction_events -> recent_actions` 정제 구현
+- [ ] 행동 로그 기반 후보 추출 구현
+- [ ] A2 후보 수 상한 유지
 - [ ] seen item 필터 적용
 
-### 3.3 LLM Prompt Personalization
+### 3.3 Mixing Extension
 
-- [ ] Path A 후보 압축 포맷에 `context` 반영 방식 추가
-- [ ] `context` 주입 prompt 템플릿 확정
-- [ ] `context` 없음/부분 입력 시 1A 기본 prompt로 degrade 되도록 구현
-- [ ] 온보딩 선호와 행동 로그를 prompt 슬롯에 어떻게 우선순위 반영할지 확정
-- [ ] 개인화 점수와 기본 점수 결합 규칙 확정
-- [ ] prompt 길이 상한과 truncation 규칙 확정
+- [ ] `A1/A2/B/C` 병합 규칙 확정
+- [ ] `A2` 비활성화 시 `A1+B+C`로 자동 degrade
+- [x] `meta.source`에 cold/warm source 구분 반영
+- [ ] `fallback_reason`에 `behavior_insufficient`, `profile_missing`, `user_signal_lookup_failed` 등 코드 체계 반영
 
-### 3.4 Serving And Fallback Extension
+### 3.4 Evaluation Split By User State
 
-- [ ] `context` 존재 시 Path A + Path B 병합 규칙 확정
-- [ ] `context` 부재 시에도 Path A + Path B 기본 모드가 유지되도록 구현
-- [ ] 개인화 경로 실패 시 Path B 중심 fallback 구현
-- [ ] personalized batch도 세션 캐시와 prefetch 규칙을 동일하게 따르도록 유지
-- [ ] `meta.source`에 baseline/personalized source 구분 반영
-- [ ] `fallback_reason`에 `context_missing`, `context_invalid` 등 코드 체계 반영
-
-### 3.5 Evaluation Split By Context Availability
-
-- [ ] `context` 있음/없음 트래픽을 분리해 CTR 비교 가능하도록 로그 적재
-- [ ] personalized path 사용 세션의 latency/timeout 영향 측정
-- [ ] `context` 없음 세션에서 품질 저하 없이 1A baseline 유지 확인
+- [ ] cold/warm 트래픽을 분리해 CTR 비교 가능하도록 로그 적재
+- [ ] `A1 CTR`, `A2 CTR`, `B CTR`을 따로 집계
+- [ ] behavior path 사용 세션의 latency 영향 측정
 
 ## 4. Phase 2 Checklist
 
-2단계 목표는 "인기 탐색 경로와 MAB를 붙여 mix ratio를 동적으로 조정하는 것"이다.
+2단계 목표는 "`MAB`를 붙여 `A1/A2/B/C` mix ratio를 동적으로 조정하는 것"이다.
 
-### 4.1 Path C. Popular Exploration Retrieval
+### 4.1 MAB Introduction
+
+- [ ] MAB의 arm을 `A1`, `A2`, `B`, `C`로 정의
+- [ ] reward 정의를 click 중심으로 확정
+- [ ] cold user와 warm user의 bandit 상태를 분리할지 결정
+- [ ] 최소 노출 비율 guardrail 확정
+- [ ] 충분한 로그 전까지는 fixed mix와 병행 가능한 모드 준비
+
+### 4.2 Popular Exploration Path C
 
 - [ ] CTR 또는 대체 popularity signal source 확정
-- [ ] 인기 기사 조회 쿼리 구현
-- [ ] 카테고리 편중 방지 기준 확정
-- [ ] 초기 로그 부족 시 popularity fallback rule 구현
-
-### 4.2 MAB Reward Loop
-
-- [ ] Path별 클릭 보상 정의
-- [ ] reward 집계 단위 확정
-- [ ] 클릭 로그에서 Path attribution 유지
-- [ ] MAB 알고리즘 초기안 확정
-- [ ] MAB의 초기 prior, 최소/최대 guardrail, 비활성화 시 fallback ratio 정의
-- [ ] 경로별 mix ratio 동적 조정 구현
-
-### 4.3 Serving Integration
-
-- [ ] Path C를 최종 후보 병합에 포함
-- [ ] `A/B/C` 최종 mix는 MAB가 결정하고, 수동 고정 비율은 fallback 용도로만 유지
-- [ ] exploration slot 성능 모니터링 추가
-- [ ] MAB 비활성화 시 고정 비율 fallback 준비
+- [ ] recency 조합 방식 확정
+- [ ] category/domain 편중 방지 규칙 확정
+- [ ] `A1/A2/B/C` mix에서 C의 최소/최대 guardrail 확정
 
 ## 5. Fallback Matrix
 
-| Failure Case | Recommended Behavior |
+아래 표는 `target state` 기준이다. 현재 구현 baseline은 `A1 + B` 중심이며, `C`는 아직 코드에 활성화되지 않았다.
+
+| 상황 | 기본 대응 |
 | --- | --- |
-| Redis 장애 | DB/직계산 기반 최신 결과로 degrade |
-| 개인화 입력 없음 | 넓은 최신 풀의 Path A와 속보 풀의 Path B를 함께 서빙 |
-| `context` 계약 미확정 | 1A 범위로 고정하고 최신순 기준 Path A/LLM을 사용 |
-| `context` 검증 실패 | 1A 기본 prompt/retrieval로 degrade하고 `fallback_reason` 기록 |
-| prefetch 실패 | 현재 batch를 끝까지 사용하고, 소진 시 동기 재생성 또는 정책 fallback |
-| Path A retrieval 실패 | Path B 중심 mix, 2단계부터는 Path B/C 중심 mix |
-| LLM timeout 또는 parse 실패 | Path A 원정렬 또는 heuristic 정렬 사용 |
-| popularity 집계 부족 | latest 기반 탐색 슬롯 대체 |
-| DB 지연/실패 | stale cache 우선, 없으면 정책 fallback |
+| 온보딩 데이터 없음 | `A1 latest baseline + B` 사용 |
+| 최근 행동 로그 부족 | `A2` 비활성화, `A1+B+C` 사용 |
+| `A1` 실패 | `B` 중심 fallback |
+| `A1/A2` 실패 | `B+C` 중심 fallback |
+| `A1/A2/B/C` 모두 실패 | latest fallback |
+| 캐시 장애 | in-memory cache 또는 latest fallback |
 
-## 6. Required Log Fields
+## 6. Validation Plan
 
-- request log 최소 필드
-  - `timestamp`
-  - `request_id`
-  - `user_id`
-  - `session_id`
-  - `limit`
-  - `context_hash`
-  - `context_present`
-  - `context_version`
-  - `latency_ms`
-  - `cache_status`
-  - `batch_generation_id`
-  - `prefetch_triggered`
-  - `prefetch_status`
-  - `prefetch_path`
-  - `remaining_a`
-  - `remaining_b`
-  - `remaining_c`
-  - `fallback_used`
-  - `fallback_reason`
-  - `path_mix`
-  - `mix_policy_source`
-  - `llm_used`
-- impression log 최소 필드
-  - `request_id`
-  - `impression_id`
-  - `user_id`
-  - `news_id`
-  - `rank`
-  - `path_source`
-  - `score_final`
-  - `served_at`
-  - `experiment_bucket`
-- 클릭 로그 최소 필드
-  - `request_id`
-  - `impression_id`
-  - `news_id`
-  - `clicked_at`
-  - `path_source`
+### API Tests
 
-## 7. Delivery Plan
+- `pytest tests/test_recommend_api.py`
 
-아래 일정은 `2026-03-09` 기준으로 다시 잡은 5주 계획이다.
+### Required Scenarios
 
-| 기간 | 목표 |
-| --- | --- |
-| `2026-03-09` ~ `2026-03-15` | Phase 1A 계약 정리, 애플리케이션 로그 기반 로그/평가 스키마, base pool 및 repository 확장 |
-| `2026-03-16` ~ `2026-03-22` | Phase 1A baseline Path A retrieval, Path B, LLM skeleton, 세션 캐시 구현 |
-| `2026-03-23` ~ `2026-03-29` | Phase 1B context 계약 반영, Path A personalization boost, personalized prompt 확장 |
-| `2026-03-30` ~ `2026-04-05` | Path C 구현, MAB reward loop, 통합 E2E |
-| `2026-04-06` ~ `2026-04-12` | QA, fallback 검증, 릴리즈 준비 |
+- cursor 재호출 시 같은 페이지가 유지되는지
+- limit mismatch cursor가 400을 반환하는지
+- `A1` 실패 시 `B` fallback이 동작하는지
+- batch 소진 전에는 prefetch 결과가 섞이지 않는지
+- batch rollover 후에는 prefetched queue가 이어지는지
 
-## 8. Validation Plan
+## 7. Open Implementation Decisions
 
-### API And Logic Tests
+- prefetch 트리거를 primary queue 합산 기준으로만 둘지, path별로 세분화할지
+- MAB를 FastAPI 프로세스 내부 상태로 둘지, 별도 저장소를 둘지
+- `user_id` 기반 사용자 신호 조회를 실시간 조회로 둘지, 일부 사전 집계 테이블로 둘지
+- Path C를 1B에서 세션 구조까지 먼저 넣을지, 2단계에서 retrieval부터 붙일지
+- pair type별 similarity calibration을 normalization으로 할지, 별도 weight matrix로 할지
+- Max-Sim 점수와 entity hard match 점수 비율을 얼마로 둘지
+- 최신성 decay 함수를 어떤 형태로 둘지
+- A1/A2 점수 normalization을 retrieval 단계에서 할지, mixing 직전에 할지
 
-- `context`가 비어 있어도 Path A + Path B 결과가 정상 반환되는지
-- `context`가 비어 있거나 미확정이어도 API 계약이 깨지지 않는지
-- `context builder`가 빈 입력, 부분 입력, 잘못된 입력에서 모두 안정적으로 동작하는지
-- Phase 1A에서 빈 `context` 기준 Path A가 `50`개 최신 후보를, Path B가 `30`개 속보 후보를 안정적으로 확보하는지
-- cursor pagination이 캐시된 path queue와 served state 기준으로 안정적으로 다음 page를 생성하는지
-- `Path A remaining <= 20`일 때 prefetch가 트리거되는지
-- 전체 잔량이 많아도 특정 path가 병목이면 prefetch가 트리거되는지
-- 현재 batch 소진 후 다음 batch 또는 보충 queue로 자연스럽게 전환되는지
-- Phase 1B에서 `context`가 있을 때 Path A가 추가 개인화 신호를 반영하는지
-- Phase 2에서 Path C가 최소 후보 수를 확보하는지
-- 차단 도메인과 seen item이 필터링되는지
-- Path 병합 시 중복 뉴스가 제거되는지
-- cursor pagination 시 동일 `request_id` 기준 순서가 유지되는지
+## 8. Constants And Config
 
-### LLM And Fallback Tests
+결정된 상수와 튜닝 대상은 한곳에 모아 관리하는 편이 낫다. 문서에는 아래 원칙으로 정리한다.
 
-- LLM timeout 시 응답이 실패하지 않고 degrade 되는지
-- LLM 응답 파싱 실패 시 fallback reason이 기록되는지
-- `context` 검증 실패 시 1A 기본 prompt/retrieval로 안전하게 degrade 되는지
-- prefetch 실패 시 현재 batch 서빙이 유지되고, 소진 시 정책 fallback이 동작하는지
-- Redis 미사용 또는 장애 상태에서도 기본 응답이 가능한지
+### 8.1 Spec Constants
 
-### Evaluation Readiness
+- 제품/설계 차원에서 고정된 값은 이 문서에 명시한다.
+- 예시
+  - `A2 input window = 20`
+  - `valid read dwell threshold = 10s`
+  - `base pool = 3 days`
+  - `pair-type calibration required`
 
-- `CTR@5/10/20`
-- `First Click Rate`
-- `Mix Ratio(A/B/C)`
-- `Mix Policy Source(MAB/Prior/Fallback)`
-- `Path-wise CTR`
-- `Latency p50/p95`
-- `Cache Hit Rate`
-- `Fallback Rate`
-- `LLM Timeout/Error Rate`
-- 온보딩 필드와 행동 로그를 `context`로 재구성 가능한지
+### 8.2 Data Source Contract
 
-## 9. Open Technical Decisions
+- 추천 서버가 `user_id` 기준으로 직접 조회해야 하는 데이터 source는 이 문서 또는 별도 source map 문서에 정리한다.
+- 최소 정리 항목
+  - A1 온보딩 source
+  - A2 최근 행동 로그 source
+  - vector lookup source
+  - C popularity source
 
-- `context` 계약을 요청 payload에 어느 수준까지 직접 둘지
-- `context builder`를 요청 경로에서만 계산할지, 미리 집계된 사용자 상태를 읽어올지
-- 다음 batch를 동기 생성과 비동기 prefetch 중 어떤 우선순위로 둘지
-- Path별 replenishment와 batch 전체 rollover 중 어느 전략을 우선할지
-- MAB 초기 prior와 guardrail을 어느 수준으로 둘지
-- 온보딩 데이터의 최소 수집 항목을 어디까지 둘지
-- 클릭만 볼지, 노출과 체류까지 함께 `recent_actions`에 넣을지
-- Path A 임베딩 저장 형식을 어디에 둘지
-- keyword 메타를 어떤 테이블 조합에서 가장 안정적으로 읽을지
-- popularity source가 준비되기 전 Path C를 어떤 규칙으로 대체할지
-- LLM 호출을 요청 경로에서 동기 처리할지, 사전 계산 또는 배치 캐시와 섞을지
-- MAB의 최소 구현을 epsilon-greedy로 시작할지, Thompson Sampling까지 바로 갈지
-- request log와 click log의 익명화 수준을 어디까지 강제할지
+#### A1 Onboarding Source
+
+- `watchlist`
+  - 목적: 사용자 관심 종목 조회
+  - key: `user_id`
+  - user_id type: `integer`
+  - join key: `stock_id`
+  - stock_id type: `char(6)`
+  - note: `user_id`, `stock_id`는 FK
+  - note: 임베딩 조인 시 `test_service_embeddings.entity_id = stock_id::varchar` and `entity_type = 'stock'`
+- `user_onboarding_keywords`
+  - 목적: 사용자 관심 키워드 조회
+  - key: `user_id`
+  - user_id type: `integer`
+  - join key: `keyword_id`
+  - keyword_id type: `integer`
+  - note: `user_id`, `keyword_id`는 FK
+  - note: 임베딩 조인 시 `test_service_embeddings.entity_id = keyword_id::varchar` and `entity_type = 'keyword'`
+
+#### Vector Lookup Source
+
+- `test_service_embeddings`
+  - 목적: 키워드/종목 벡터 조회
+  - columns: `entity_id`, `entity_type`, `display_name`, `gnn_embedding`, `model_version`
+  - entity_type values: `news`, `keyword`, `stock`
+  - key: unique(`entity_id`, `entity_type`)
+  - note: FK가 없으므로 `entity_id + entity_type` 조합으로 조심해서 조회해야 한다
+  - note: `entity_id` 타입이 `varchar(20)`이므로 `stock_id(char(6))`, `keyword_id(integer)`와 join 시 형변환 규칙을 명확히 해야 한다
+
+#### A2 Behavior Source
+
+- `interaction_events`
+  - 목적: 최근 행동 로그 조회
+  - key: `user_id`
+  - core columns: `user_id`, `event_type`, `news_id`, `content_session`, `event_ts_client`, `event_ts_server`
+  - event types: `content_view`, `content_leave`
+  - note: 같은 `content_session`의 `content_view`와 `content_leave`를 묶어 dwell time을 계산한다
+  - note: 기본 이벤트 시각은 `event_ts_client`를 사용하고, `event_ts_server`는 보조 검증용으로 사용한다
+
+#### News Entity Reconstruction Source
+
+- `news_keyword_mapping`
+  - 목적: `news_id -> keyword_id` 복원
+  - columns: `news_id`, `keyword_id`
+  - note: 모두 FK
+- `news_stock_mapping`
+  - 목적: `news_id -> stock_id` 복원
+  - columns: `news_id`, `stock_id`
+  - note: 모두 FK
+
+#### Pending Source Details
+
+- `Path C` popularity source는 아직 미정
+- `news_keyword_mapping.keyword_id`, `news_stock_mapping.stock_id`도 같은 방식으로 임베딩 테이블과 직접 연결하는지 최종 확인 필요
+
+### 8.3 Runtime Config
+
+- 실제 코드에서 환경별로 바뀔 수 있는 값은 [config.py](/home/dobi/Crawling/app/core/config.py)에 둔다.
+- 예시
+  - candidate limit
+  - mix weight
+  - prefetch low watermark
+  - cache TTL
+
+### 8.4 Tuning Registry
+
+- 아직 미결정이지만 실험으로 정해야 하는 값은 이 문서의 `Open Implementation Decisions`에 남긴다.
+- 예시
+  - Max-Sim score : entity boost 비율
+  - decay 함수 형태
+  - score normalization 방식

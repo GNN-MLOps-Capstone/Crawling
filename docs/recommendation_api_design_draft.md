@@ -7,13 +7,12 @@
 - 구현 작업, 테스트 순서, 운영 체크리스트는 [recommendation_api_operations_draft.md](/home/dobi/Crawling/docs/recommendation_api_operations_draft.md)에서 관리한다.
 - 현재 코드와 문서가 다르면, 구현 전까지의 실제 동작은 코드 기준으로 본다.
 
-## 1. Background And Problem (Why We Pivot)
+## 1. Background And Problem
 
-- 기존 구상은 GNN, LightGBM 기반 랭킹 모델과 이를 뒷받침하는 대규모 행동 로그, 학습 파이프라인, 운영 자동화를 전제로 했다.
-- 하지만 현재 상태에서는 클릭, 체류시간, 노출 로그가 충분히 적재되지 않았고, 남은 개발 기간 안에 이를 안정적으로 구축해 E2E 검증까지 마치는 것은 과도한 범위다.
-- 따라서 v1은 "무거운 학습 파이프라인"보다 "짧은 기간 안에 실제로 서빙 가능한 추천 구조"에 집중한다.
-- 새 방향은 데이터 의존도를 낮추면서 본문 전체 비교의 노이즈를 줄이기 위해, 정제된 종목/키워드 임베딩 기반 멀티 패스 리트리벌, LLM 랭킹, MAB 기반 믹싱을 결합한 하이브리드 구조다.
-- 동시에 초반부터 온라인 지표와 오프라인 점검 기준을 함께 설계해, 추천 품질 개선 여부를 관측 가능하게 만든다.
+- 기존 구상은 멀티 패스 리트리벌 뒤에 `LLM Ranker`를 두는 하이브리드 구조였다.
+- 하지만 현재 단계에서 핵심 리스크는 재정렬 정밀도보다도 `cold start 처리`, `행동 로그 루프`, `세션 일관성`, `fallback 안정성`이다.
+- 따라서 v1은 LLM 재정렬을 제거하고, 추천 후보 경로를 더 분명하게 나눈 뒤, 서빙 단계에서 경로 믹싱과 데이터 루프를 먼저 안정화하는 쪽으로 정리한다.
+- 새 방향은 `온보딩 기반 추천`, `로그 기반 추천`, `최신 속보`, `인기 탐색`을 병렬로 만들고, 이후 `MAB`가 이를 동적으로 믹싱하는 구조다.
 
 ## 2. Product Goal
 
@@ -21,42 +20,44 @@
 
 - 엔드포인트는 `POST /recommend/news`다.
 - FastAPI 추천 API는 이미 존재한다.
-- 현재는 개인화 없이 최신 뉴스 `news_id`를 cursor 기반으로 반환하는 mock 단계다.
-- 현재 cursor는 `request_id/offset/limit`만 유지하고, 추천 결과 리스트 자체를 캐시하지 않는다.
+- 현재는 개인화 없이 최신 뉴스 `news_id`를 cursor 기반으로 반환하는 mock 단계에서 확장 중이다.
+- 세션 캐시, fallback, 구조화 로그는 들어가고 있으나 경로 정의와 품질 측정은 더 정리할 필요가 있다.
 
 ### v1 목표
 
-- v1은 "완전한 ML 개인화 시스템"이 아니라 "실제로 서빙 가능한 하이브리드 추천 파이프라인" 구축이 목표다.
+- v1의 목표는 "실제로 서빙 가능한 멀티 패스 추천 파이프라인"이다.
 - 추천 응답은 아래 성격의 후보를 함께 다뤄야 한다.
-  - 개인화 후보
+  - 온보딩 기반 추천
+  - 로그 기반 추천
   - 최신 속보 후보
-- 최종 서빙 직전에는 단일 최신순이 아니라 경로별 후보를 혼합하는 구조를 가져야 한다.
-- 장애나 입력 부족 시에도 앱 화면에는 자연스러운 fallback 결과가 나와야 한다.
+  - 인기 탐색 후보
+- 추천 계산에 필요한 사용자 신호는 외부에서 완성된 `context`를 전달받기보다, 추천 서버가 `user_id` 기준으로 내부 DB/로그 저장소를 조회해 조합하는 방식을 기본으로 한다.
+- 최종 서빙은 단일 최신순이 아니라 경로별 후보를 혼합하는 구조를 가져야 한다.
+- 특히 개인화 경로인 `A1`, `A2`는 관심사를 평균 내어 희석하지 않고, 다중 관심사를 보존하는 구조를 가져야 한다.
+- 신규 사용자와 warm user 모두 자연스러운 결과를 받아야 한다.
 
 ### 단계별 목표
 
 - 1단계
-  - 1A. `context`가 비어 있어도 동작하는 Path A/LLM 뼈대 구축
+  - 1A. `온보딩 기반 경로(A1)`와 `최신 속보 경로(B)` 구축
   - 1A. 세션 캐시와 cursor slice 구조 구축
-  - 1A. Path B 최신 속보 경로와 fallback 구축
-  - 1B. 확정된 `context` 계약을 Path A와 LLM prompt에 반영
-  - 1B. 온보딩/행동 로그를 `context`로 연결
+  - 1A. 구조화 로그와 fallback 체계 고정
+  - 1B. `로그 기반 경로(A2)` 추가
+  - 1B. `user_id` 기준 온보딩/행동 로그 내부 조회 경로 고정
 - 2단계
-  - Path C 인기 탐색 경로 보강
-  - 클릭 로그 기반 MAB 도입
-  - 경로별 mix ratio 동적 조정
+  - `MAB`를 `A1/A2/B/C` 믹싱에 도입
+  - `Path C(인기 탐색)` 품질과 가드레일 보강
+  - 클릭 로그 기반 보상 계산과 guardrail 운영
 
 ### v1 비목표
 
+- LLM 기반 재정렬 서빙
 - 대규모 행동 로그를 전제로 한 GNN 학습 파이프라인
 - LightGBM 기반 학습 랭커 서빙
 - 완성형 MLOps 자동화
-- 모든 Path에 대한 LLM 재정렬
 - 고도화된 장기 사용자 프로파일링
 
 ## 3. Target Recommendation Architecture
-
-추천 파이프라인은 후보를 하나의 검색 방식으로 뽑는 대신, 성격이 다른 여러 경로에서 확보한 뒤 서빙 직전에 혼합하는 구조를 따른다.
 
 ### 3.1 Stage 1. Base Pool
 
@@ -71,57 +72,94 @@
 ### 3.2 Stage 2. Multi-Path Retrieval
 
 - 목적: 서로 다른 추천 목적을 가진 후보 바구니를 병렬로 만든다.
-- 기본 경로는 아래 세 가지다.
 
 | Path | 목적 | 기본 로직 | 데이터 소스 |
 | --- | --- | --- | --- |
-| Path A | 기본 추천 + 개인화 확장 | `context`가 없으면 더 넓은 최신 풀에서 최신순 후보를 만들고, `context`가 있으면 여기에 개인화 신호를 누적 | RDBMS + 이후 임베딩 저장소 |
-| Path B | 최신 속보 | Path A보다 더 짧은 시간창의 속보 기사 우선 추출 | RDBMS |
-| Path C | 인기 탐색 | 앱 내 CTR이 높은 타 카테고리 기사 추출 | RDBMS + 집계 로그 |
+| Path A1 | 온보딩 기반 추천 | 가입 시 선택한 관심사(키워드/종목) 집합을 query로 사용하고, 평균 대신 Late Interaction(Max-Sim)으로 매칭 | RDBMS |
+| Path A2 | 로그 기반 추천 | 최근 20개 클릭/유효 읽기 로그의 키워드/종목에 대해 시간 감쇠와 Late Interaction(Max-Sim)을 적용 | RDBMS |
+| Path B | 최신 속보 | 짧은 시간창의 속보 기사 우선 추출 | RDBMS |
+| Path C | 인기 탐색 | CTR, 최근성, 편중 제어를 함께 반영한 인기 기사 후보를 생성 | RDBMS + 집계 로그 |
 
-- 1단계 초기 목표는 Path A `50개`, Path B `30개` 수준의 후보를 확보하는 것이다.
-- `context`가 없는 1A에서는 Path A가 "넓은 최신성", Path B가 "짧은 속보성" 역할을 맡는다.
-- Path A는 본문 전체가 아니라 정제된 키워드/종목 표현을 우선 사용하되, 1A에서는 최신순 baseline으로 먼저 시작할 수 있다.
+- `Path C`는 기존 멀티 패스 구조의 정식 경로로 유지한다.
+- 1A 초기 구현은 `A1`과 `B`를 우선 올리고, `A2`와 `C`는 내부 데이터 조회 경로와 큐 구조를 먼저 고정한 뒤 후속 단계에서 활성화한다.
+- `A1`은 cold start 대응의 기본 exploitation 경로다.
+- `A2`는 행동 데이터가 충분한 사용자에게 우선 적용되는 warm path다.
+- `B`는 freshness 보강과 탐색 역할을 맡는다.
+- `C`는 인기 기반 exploration을 담당하되, recency와 카테고리 편중 제어를 함께 가져가야 한다.
 
-### 3.3 Stage 3. LLM As A Ranker
+#### User Signal Loading Principle
 
-- 목적: Path A의 개인화 후보를 더 정밀하게 재정렬한다.
-- 적용 범위
-  - 초기에는 Path A 후보 `50`개 전체를 재정렬 대상으로 본다.
-  - Path B, Path C는 초기에는 LLM 재정렬 없이 유지한다.
-- 기본 로직
-  - Path A에서 이미 압축된 후보 리스트를 LLM에 전달한다.
-  - 후보별 `relevance`, `novelty`, `clarity`, `final` 점수를 산출한다.
-  - 최종 정렬은 애플리케이션이 `final` 점수 기준으로 수행한다.
-- `context`가 없을 때도 같은 prompt shape를 유지하되, 빈 슬롯에는 기본 문구를 넣어 일반 추천 점수를 계산하게 한다.
-- 목적은 "모든 경로를 LLM으로 처리"하는 것이 아니라, 비용과 지연을 통제하면서 Path A 후보의 정밀도를 높이는 것이다.
+- 추천 서버는 `user_id`를 기준으로 필요한 사용자 신호를 직접 조회한다.
+- 외부 요청의 기본 계약은 최소한의 서빙 파라미터만 유지한다.
+  - `user_id`
+  - `limit`
+  - `cursor`
+  - `request_id`
+- `profile`, `recent_actions`, `session_signals`는 외부 입력의 필수 계약이 아니라 추천 서버 내부 정규화 결과로 본다.
+- 필요 시 디버깅/override 용 보조 입력은 둘 수 있지만, 기본 경로는 `user_id -> profile/log lookup -> normalized user signals -> retrieval`이다.
+- 초기 source map은 아래를 기준으로 한다.
+  - 온보딩 종목: `watchlist(user_id, stock_id)`
+  - 온보딩 키워드: `user_onboarding_keywords(user_id, keyword_id)`
+  - 벡터 조회: `test_service_embeddings(entity_id, entity_type, gnn_embedding)`
+  - 행동 로그: `interaction_events(user_id, event_type, news_id, content_session, event_ts_client, ...)`
+  - 뉴스-엔터티 매핑: `news_keyword_mapping(news_id, keyword_id)`, `news_stock_mapping(news_id, stock_id)`
 
-### 3.4 Stage 4. Mixing And Exploration
+#### 상세 스펙: A1 & A2 Logic Definition
 
-- 목적: 최종 노출 리스트를 개인화와 탐색이 공존하는 형태로 구성한다.
+- 공통 벡터 전략
+  - `No Average Pooling`: 유저의 관심사 벡터들을 하나로 평균 내지 않는다.
+  - `Late Interaction / Max-Sim`: 유저가 가진 여러 관심사 벡터 각각에 대해, 후보 기사의 키워드 벡터 중 가장 유사한 벡터를 찾아 점수를 매긴 뒤 합산한다.
+  - `Entity Boosting`: 벡터 유사도와 별개로 종목 코드가 일치하면 hard match 가산점을 부여한다.
+  - `Type-Aware Similarity Calibration`: `keyword-keyword`, `stock-stock`, `keyword-stock` 쌍은 raw 유사도 분포가 다를 수 있으므로, 동일 스케일로 바로 합산하지 않는다. pair type별 normalization 또는 weight를 적용해 점수를 보정한다.
+  - `Diversity Guardrail`: Max-Sim 점수가 높더라도 동일 종목이나 동일 테마로 결과가 과도하게 몰리지 않도록, serving 단계에서 동일 종목/카테고리 반복 노출 상한을 둔다.
+- Path A1
+  - `Input`: `user_id` 기준으로 조회한 온보딩/설정의 키워드 및 종목 리스트 전체
+  - `Source`: `watchlist`, `user_onboarding_keywords`
+  - `Embedding Join Rule`: `stock_id`와 `keyword_id`는 문자열 기준으로 `test_service_embeddings.entity_id`와 비교할 수 있지만, 반드시 `entity_type='stock'` 또는 `entity_type='keyword'`를 함께 지정한다.
+  - `Weight`: 사용자가 직접 선택한 신호이므로 모든 입력에 높은 초기 가중치를 부여한다.
+  - `Entity Boosting`: 사용자가 명시적으로 선택한 종목과 일치하는 기사에는 stronger hard match를 부여한다.
+- Path A2
+  - `Input Scope`: `user_id` 기준으로 조회한 최근 20개 클릭/유효 읽기 로그만 사용한다.
+  - `Source`: `interaction_events`
+  - `Noise Filter`: 체류 시간 `10초` 미만 로그는 제외한다.
+  - `Event Definition`: `content_view`를 뉴스 진입, `content_leave`를 뉴스 이탈로 보고, 같은 `content_session` 값으로 연결한다.
+  - `Dwell Time`: `content_view.event_ts_client`와 `content_leave.event_ts_client` 차이로 계산한다.
+  - `Time Reference`: 최신성 계산과 정렬에는 `event_ts_client`를 우선 사용하고, `event_ts_server`는 보조 검증용으로 사용한다.
+  - `Log Structure`: 로그 1개는 `{ timestamp, news_id, extracted_keywords[], extracted_stock_entities[] }`를 기본 단위로 본다.
+  - `Grouping`: 20개 로그에서 추출된 키워드를 유니크 키워드 단위로 압축하되, 원시 출현 빈도는 유지한다.
+  - `Weighting`: 빈도 `log(1+N)`와 최신성 decay를 결합해 각 키워드 및 종목의 가중치를 계산한다.
+  - `Matching`: 가중치가 적용된 키워드/종목 집합을 query로 사용하되, pair type별 score calibration 이후 Max-Sim 검색을 수행한다.
+  - `Entity Boosting`: 로그에서 반복적으로 등장한 종목에만 hard match 가중치를 부여한다.
+  - `Entity Reconstruction`: `news_id`로 `news_keyword_mapping`, `news_stock_mapping`을 조회해 키워드/종목 엔터티를 복원한다.
+  - `Embedding Join Rule`: 복원된 `keyword_id`, `stock_id`도 문자열 기준으로 `test_service_embeddings.entity_id`와 비교하되, 각각 `entity_type='keyword'`, `entity_type='stock'`를 함께 지정한다.
+
+### 3.3 Stage 3. Mixing And Exploration
+
+- 목적: 최종 노출 리스트를 exploitation과 freshness가 공존하는 형태로 구성한다.
 - 기본 방향
-  - 1A에서는 Path A가 넓은 최신성 baseline 역할을 한다.
-  - 1B부터 Path A는 개인화 exploitation 역할을 강화한다.
-  - 1단계에서는 Path B가 속보성 보강 및 exploration 역할을 한다.
-  - 2단계부터는 Path C와 MAB를 붙여 동적 비율 조정을 시작한다.
-- 최종 노출 비율은 사람이 고정하지 않고 MAB가 결정한다.
-- 문서에 남는 비율은 MAB의 초기 prior 또는 비활성화 시 fallback guardrail로만 사용한다.
-- 초기 prior는 Path A 우세 구조를 두되, Path B와 Path C가 학습 가능한 최소 슬롯은 확보하는 방향이 적절하다.
+  - `A1`은 cold start와 온보딩 기반 개인화의 기본 경로다.
+  - `A2`는 warm user에서 우세한 개인화 경로다.
+  - `B`는 freshness 보강과 exploration을 담당한다.
+  - `C`는 popularity 기반 exploration과 안전한 다양성 보강을 담당한다.
+- 최종 노출 비율은 장기적으로 `MAB`가 결정한다.
+- 다만 초기 운영에서는 아래를 먼저 둔다.
+  - 고정 또는 준고정 mix ratio
+  - 최소/최대 노출 가드레일
+  - `A2` 활성화 조건
+  - `C` 편중 방지 규칙
+- 즉, 1단계의 목표는 "MAB-ready한 서빙 구조"이고, 2단계에서 실제 bandit 자동화를 붙인다.
 
-### 3.5 Stage 5. Session Cache And Refill
+### 3.4 Stage 4. Session Cache And Refill
 
-- 목적: 같은 세션 안에서 추천 순서를 고정하고, 페이지 이동 시 LLM 재호출을 피한다.
+- 목적: 같은 세션 안에서 추천 순서를 고정하고, 페이지 이동 시 재계산 비용을 줄인다.
 - 기본 방향
-  - 첫 요청에서 Path A/B와 LLM을 거쳐 path별 candidate queue를 생성한다.
-  - 세션 캐시에는 `request_id` 기준으로 `A/B/C queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
-  - 다음 페이지 요청은 현재 mix policy에 따라 각 path queue에서 필요한 개수만큼 꺼내 page를 합성한다.
-  - prefetch는 전체 잔량이 아니라 path별 병목 기준으로 판단한다.
-  - 1A 기준 기본 trigger는 `Path A remaining <= 20`이다.
-  - 현재 batch가 소진되면 prefetch된 다음 batch 또는 보충 queue로 자연스럽게 전환한다.
+  - 첫 요청에서 `A1/A2/B/C` path별 candidate queue를 생성한다.
+  - 세션 캐시에는 `request_id` 기준으로 `onboarding/behavior/breaking/popular queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
+  - 다음 페이지 요청은 현재 mix policy에 따라 각 queue에서 필요한 개수만큼 꺼내 page를 합성한다.
+  - prefetch는 전체 잔량이 아니라 primary path 병목 기준으로 판단한다.
 - 기대 효과
   - 같은 세션 안에서 결과 순서가 안정적으로 유지된다.
-  - 페이지 이동마다 LLM을 다시 호출하지 않아도 된다.
-  - 마지막 페이지 이후 응답 지연을 줄일 수 있다.
+  - 페이지 이동 시 재조회 부담을 줄인다.
   - 특정 path만 먼저 바닥나서 mix가 무너지는 문제를 줄일 수 있다.
 
 ## 4. Serving Principles
@@ -135,43 +173,48 @@
   - `next_cursor`
   - `meta.source`
   - `meta.fallback_used`
+- 요청 필드는 `user_id` 중심으로 최소화하고, 추천 서버가 내부적으로 사용자 신호를 조회하는 구조를 기본으로 한다.
 
 ### 4.2 Session And Pagination
 
 - cursor 기반 pagination은 유지한다.
 - 클라이언트는 같은 `request_id` 기준으로 다음 페이지를 요청한다.
-- 추천 결과는 `request_id` 단위 세션 캐시에 path별 queue와 served state로 저장되는 것을 기본 전제로 한다.
+- 추천 결과는 `request_id` 단위 세션 캐시에 path별 queue와 served state로 저장된다.
 - cursor는 현재 세션 상태에서 다음 page를 생성하기 위한 포인터 역할을 한다.
-- 구현 상세는 바뀔 수 있지만, 사용자 입장에서는 페이지 간 결과 순서가 일관되어야 한다.
 
 ### 4.3 Refill Principle
 
 - 추천 세션은 "매 페이지 재계산"이 아니라 "배치 생성 후 소진" 구조를 따른다.
 - 현재 batch가 남아 있으면 캐시된 path queue를 우선 사용한다.
-- prefetch는 전체 잔량이 아니라 path별 병목 기준으로 판단한다.
-- 1A 기본 규칙은 `Path A remaining <= 20`일 때 다음 batch 또는 Path A 보충을 시작하는 것이다.
-- prefetch에 실패해도 현재 batch 서빙은 유지하고, 소진 시점에 재생성 또는 fallback으로 degrade 한다.
+- prefetch는 primary queue 잔량 기준으로 판단한다.
+- prefetch 실패 시 현재 batch 서빙은 유지하고, 소진 시점에 재생성 또는 fallback으로 degrade 한다.
 
 ### 4.4 Bandit Principle
 
-- 최종 노출 슬롯의 Path별 배분은 MAB가 결정하는 것을 원칙으로 한다.
-- 사람이 직접 고정하는 값은 최종 mix가 아니라 MAB의 초기 prior, 최소/최대 가드레일, 비활성화 시 fallback 비율이다.
-- 따라서 retrieval 단계의 후보 수와 serving 단계의 최종 mix를 구분해서 설계해야 한다.
+- 최종 노출 슬롯의 Path별 배분은 `MAB`가 결정하는 것을 원칙으로 한다.
+- 사람이 직접 고정하는 값은 최종 mix가 아니라 다음 항목이다.
+  - 초기 prior
+  - 최소/최대 가드레일
+  - 비활성화 시 fallback 비율
+- 초기에는 `A1/A2/B/C` 경로를 모두 MAB 대상 후보로 보되, 아래 규칙을 둔다.
+  - `A2`는 행동 데이터가 충분할 때만 활성화
+  - cold user는 `A1 + B` 중심
+  - `A1/A2` 모두 약하면 `B`와 `C` 비중 확대
 
 ### 4.5 Fallback Principle
 
 - 입력 부족은 실패가 아니다.
-- `context`가 없으면 Path A는 더 넓은 최신 풀, Path B는 더 짧은 속보 풀 기준으로 동작한다.
-- 개인화 경로가 약하면 우선 최신 경로 비중을 늘린다.
-- 이후 2단계에서 인기 경로가 안정화되면 MAB prior와 latest/popular 조합 기반 fallback을 확장한다.
-- LLM, MAB, 캐시, 일부 리트리벌 경로에 문제가 생겨도 앱 화면에는 fallback 결과가 반환되어야 한다.
-- fallback은 빈 화면보다 latest/popular 조합을 우선한다.
+- 온보딩 데이터가 없으면 `A1`은 latest baseline으로 degrade 한다.
+- 최근 행동 로그가 없거나 약하면 `A2`는 비활성화하고 `A1 + B`로 간다.
+- `A1/A2`가 모두 실패하면 `B + C` 중심 fallback을 사용한다.
+- 리트리벌, MAB, 캐시에 문제가 생겨도 앱 화면에는 fallback 결과가 반환되어야 한다.
+- fallback은 빈 화면보다 `latest/breaking/popular` 조합을 우선한다.
 
 ### 4.6 Cold Start Principle
 
 - 신규 사용자에게도 결과가 나와야 한다.
 - 방금 발행된 신규 기사도 병목 없이 후보에 들어올 수 있어야 한다.
-- 사용자 로그가 없어도 Path A 최신 풀과 Path B 속보 풀만으로 기본 서빙이 가능해야 한다.
+- 사용자 로그가 없어도 `A1`과 `B`만으로 기본 서빙이 가능해야 한다.
 
 ## 5. Evaluation And Success Criteria
 
@@ -180,50 +223,44 @@
 - 목표는 추천 API가 앱에서 체감 가능한 속도로 응답하는 것이다.
 - 캐시 hit 구간에서는 `0.2초` 수준 응답을 지향한다.
 - miss 구간은 더 느릴 수 있지만, 앱 사용성에 문제 없는 수준으로 통제해야 한다.
-- 특히 페이지 이동 요청은 세션 캐시 hit를 기본값으로 두고, 마지막 페이지 인근의 refill 지연을 최소화해야 한다.
 
 ### 5.2 Online Metrics
 
-- 아래 지표는 애플리케이션 구조화 로그를 기반으로 일 단위 집계와 모니터링이 가능해야 한다.
+- 아래 지표는 구조화 로그를 기반으로 일 단위 집계와 모니터링이 가능해야 한다.
   - `CTR@5/10/20`
   - `First Click Rate`
   - `Clicks Per Session`
-  - `Mix Ratio(A/B/C)`
+  - `Mix Ratio(A1/A2/B/C)`
   - `Path-wise CTR`
-  - `Exploration Slot CTR`
+  - `Cold vs Warm CTR`
   - `Latency p50/p95`
   - `Cache Hit Rate`
   - `Prefetch Success Rate`
   - `Fallback Rate`
-  - `LLM Timeout/Error Rate`
+  - `Bandit Allocation Share`
 
 ### 5.3 Offline Evaluation
 
-- 초기 로그가 부족하더라도 최신순 baseline 대비 품질 차이를 점검할 수 있어야 한다.
+- 최신순 baseline 대비 품질 차이를 점검할 수 있어야 한다.
 - 오프라인 점검에서는 아래 항목을 함께 본다.
   - 다양성
   - 중복률
   - 최신성
   - 안정성
-- 필요 시 AI 보조 평가를 사용하되, baseline 대비 어떤 지표가 개선되었는지 명시적으로 비교한다.
 
 ### 5.4 Qualitative Success
 
-- 특정 카테고리 편중만 심한 결과가 아니라, 개인화와 탐색이 의도한 비율로 함께 노출되어야 한다.
-- 사용자는 추천 피드가 "모두 같은 기사" 또는 "전부 최신 기사만 나열된 화면"처럼 느껴지지 않아야 한다.
-
-### 5.5 Safety And Reliability
-
-- 예외 상황에서도 앱 화면에 에러나 과도한 지연이 직접 노출되지 않아야 한다.
-- 클릭 로그가 적재되고, 이 로그가 이후 믹싱 또는 보상 계산에 반영되는 데이터 루프가 확인되어야 한다.
+- 특정 카테고리 편중만 심한 결과가 아니라, 온보딩 기반 추천, 로그 기반 추천, 최신 속보, 인기 탐색이 의도한 비율로 함께 노출되어야 한다.
+- 사용자는 추천 피드가 "전부 최신 기사만 나열된 화면" 또는 "내 취향만 과도하게 반복되는 화면"처럼 느껴지지 않아야 한다.
 
 ## 6. Open Product Decisions
 
-- Path A에서 사용할 개인화 입력의 최소 집합을 어디까지 둘지
-- `context` 없는 1A baseline에서 Path A의 최신 풀 시간 범위를 어디까지 둘지
 - prefetch 임계치를 남은 몇 개 기준으로 둘지
-- next batch 생성을 FastAPI 내부 비동기 처리로 둘지, 별도 작업 큐로 분리할지
-- Path C의 "인기"를 CTR만으로 볼지, recency를 섞을지
-- 초기 MAB의 최소 단위를 Path 단위로 둘지, 슬롯 단위까지 세분화할지
+- 초기 MAB를 path 단위로만 둘지, 슬롯 단위까지 세분화할지
+- 추천 서버가 조회할 사용자 신호 source를 실시간 조회로 둘지, 일부 사전 집계 테이블로 둘지
+- `C`의 popularity 정의에 recency와 diversity penalty를 어떻게 섞을지
+- `keyword-keyword`, `stock-stock`, `keyword-stock` pair type별 similarity calibration을 어떤 방식으로 둘지
+- Max-Sim 연산에서 `keyword vector score`와 `entity hard match score`의 가중치 비율을 어떻게 둘지
+- 최신성 decay 함수를 `exp`, `half-life`, 구간 감쇠 중 어떤 형태로 둘지
+- `A1`과 `A2` score를 serving 전에 어떤 방식으로 normalization 할지
 - 캐시 miss 시 새 세션 발급과 기존 세션 복원 중 무엇을 우선할지
-- 온라인 지표 대시보드의 최소 공개 범위를 어디까지 둘지
