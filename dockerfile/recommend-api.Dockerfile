@@ -4,6 +4,7 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -13,6 +14,7 @@ COPY requirements/requirements_recommend_api.txt /tmp/requirements_recommend_api
 RUN pip install --no-cache-dir -r /tmp/requirements_recommend_api.txt
 
 COPY app /app/app
+COPY tests /app/tests
 
 EXPOSE 8000
 
