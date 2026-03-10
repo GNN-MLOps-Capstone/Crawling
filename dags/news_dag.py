@@ -4,6 +4,7 @@ import pendulum
 from airflow.decorators import task
 from airflow.hooks.base import BaseHook
 from airflow.models.dag import DAG
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 PYTHON_VENV_PATH = '/opt/airflow/venv_nlp/bin/python'
 
@@ -11,8 +12,9 @@ PYTHON_VENV_PATH = '/opt/airflow/venv_nlp/bin/python'
 with DAG(
         dag_id="news_dag",
         start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
-        schedule='0 */3 * * *',
+        schedule='0 * * * *',
         catchup=False,
+        max_active_runs=1,
         doc_md="""
     ### 
     - first step: naver API를 호출하여 데이터를 수집하고 PostgreSQL에 저장합니다.
@@ -70,4 +72,14 @@ with DAG(
     context = prepare_ingestion_context()
     collect_task = collect_naver_news(context)
     crawl_task = news_crawler(context)
-    collect_task >> crawl_task
+    trigger_hourly_integration = TriggerDagRunOperator(
+        task_id="trigger_news_ingestion_integration_hourly",
+        trigger_dag_id="news_ingestion_integration_hourly",
+        conf={
+            "window_start": "{{ data_interval_start.in_timezone('Asia/Seoul').to_datetime_string() }}",
+            "window_end": "{{ data_interval_end.in_timezone('Asia/Seoul').to_datetime_string() }}",
+        },
+        wait_for_completion=False,
+    )
+
+    collect_task >> crawl_task >> trigger_hourly_integration
