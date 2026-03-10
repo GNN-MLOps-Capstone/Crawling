@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.config import settings
+from app.schemas.recommend import RecommendDebugContext
 
 logger = logging.getLogger(__name__)
 
@@ -39,35 +40,34 @@ class RecommendContextBuilder:
     def build(
         self,
         *,
-        user_id: str,
-        raw_context: dict[str, Any] | None,
+        user_id: int,
+        raw_context: RecommendDebugContext | dict[str, Any] | None,
         repository: Any,
     ) -> NormalizedRecommendContext:
-        payload = raw_context or {}
+        if isinstance(raw_context, RecommendDebugContext):
+            payload = raw_context.model_dump(exclude_none=True)
+        else:
+            payload = raw_context or {}
         profile: dict[str, Any] = {}
         recent_actions: list[dict[str, Any]] = []
         session_signals = payload.get("session_signals")
         lookup_errors: list[str] = []
         signal_source = "internal_lookup"
 
-        normalized_user_id = self._parse_user_id(user_id)
-        if normalized_user_id is None:
-            lookup_errors.append("invalid_user_id")
-        else:
-            try:
-                profile = repository.fetch_user_onboarding_profile(user_id=normalized_user_id)
-            except Exception as exc:
-                logger.warning("failed to load onboarding profile for user_id=%s: %s", user_id, exc)
-                lookup_errors.append("profile_lookup_failed")
-            try:
-                recent_actions = repository.fetch_recent_actions(
-                    user_id=normalized_user_id,
-                    limit=settings.behavior_action_limit,
-                    dwell_threshold_seconds=settings.valid_read_dwell_seconds,
-                )
-            except Exception as exc:
-                logger.warning("failed to load recent actions for user_id=%s: %s", user_id, exc)
-                lookup_errors.append("behavior_lookup_failed")
+        try:
+            profile = repository.fetch_user_onboarding_profile(user_id=user_id)
+        except Exception as exc:
+            logger.warning("failed to load onboarding profile for user_id=%s: %s", user_id, exc)
+            lookup_errors.append("profile_lookup_failed")
+        try:
+            recent_actions = repository.fetch_recent_actions(
+                user_id=user_id,
+                limit=settings.behavior_action_limit,
+                dwell_threshold_seconds=settings.valid_read_dwell_seconds,
+            )
+        except Exception as exc:
+            logger.warning("failed to load recent actions for user_id=%s: %s", user_id, exc)
+            lookup_errors.append("behavior_lookup_failed")
 
         override_profile = payload.get("profile")
         override_recent_actions = payload.get("recent_actions")
@@ -93,10 +93,3 @@ class RecommendContextBuilder:
             signal_source=signal_source,
             lookup_errors=tuple(lookup_errors),
         )
-
-    @staticmethod
-    def _parse_user_id(user_id: str) -> int | None:
-        try:
-            return int(user_id)
-        except (TypeError, ValueError):
-            return None

@@ -25,6 +25,7 @@ class RetrievalResult:
     onboarding: list[NewsCandidate]
     behavior: list[NewsCandidate]
     breaking: list[NewsCandidate]
+    popular: list[NewsCandidate]
     fallback_used: bool = False
     fallback_reason: str | None = None
 
@@ -40,6 +41,8 @@ class RetrievalService:
     onboarding_limit: int
     behavior_limit: int
     breaking_limit: int
+    popular_hours: int
+    popular_limit: int
     blocked_domains: tuple[str, ...] = ()
 
     def retrieve(
@@ -53,9 +56,11 @@ class RetrievalService:
         onboarding: list[NewsCandidate] = []
         behavior: list[NewsCandidate] = []
         breaking: list[NewsCandidate] = []
+        popular: list[NewsCandidate] = []
         onboarding_failed = False
         behavior_failed = False
         breaking_failed = False
+        popular_failed = False
         behavior_insufficient = False
         base_pool: list[NewsCandidate] = []
 
@@ -113,27 +118,44 @@ class RetrievalService:
             logger.warning("breaking retrieval failed: %s", exc)
             breaking_failed = True
 
+        try:
+            popular = self.repository.fetch_popular_candidates(
+                limit=self.popular_limit,
+                hours=self.popular_hours,
+                exclude_ids=exclude_ids
+                | {item.news_id for item in onboarding}
+                | {item.news_id for item in behavior}
+                | {item.news_id for item in breaking},
+                blocked_domains=self.blocked_domains,
+            )
+        except Exception as exc:
+            logger.warning("popular retrieval failed: %s", exc)
+            popular_failed = True
+
         if onboarding or behavior:
             return RetrievalResult(
                 onboarding=onboarding,
                 behavior=behavior,
                 breaking=breaking,
-                fallback_used=onboarding_failed or behavior_failed or breaking_failed,
+                popular=popular,
+                fallback_used=onboarding_failed or behavior_failed or breaking_failed or popular_failed,
                 fallback_reason=self._fallback_reason(
                     onboarding_failed=onboarding_failed,
                     behavior_failed=behavior_failed,
                     breaking_failed=breaking_failed,
+                    popular_failed=popular_failed,
                     behavior_insufficient=behavior_insufficient,
                 ),
             )
 
-        if breaking:
+        if breaking or popular:
             return RetrievalResult(
                 onboarding=[],
                 behavior=[],
                 breaking=breaking,
+                popular=popular,
                 fallback_used=True,
-                fallback_reason="primary_failed_use_breaking",
+                fallback_reason="primary_failed_use_exploration",
             )
 
         try:
@@ -156,6 +178,7 @@ class RetrievalService:
                 onboarding=onboarding,
                 behavior=[],
                 breaking=[],
+                popular=[],
                 fallback_used=True,
                 fallback_reason="retrieval_failed",
             )
@@ -165,6 +188,7 @@ class RetrievalService:
                 onboarding=[],
                 behavior=[],
                 breaking=[],
+                popular=[],
                 fallback_used=True,
                 fallback_reason="db_failed",
             )
@@ -175,6 +199,7 @@ class RetrievalService:
         onboarding_failed: bool,
         behavior_failed: bool,
         breaking_failed: bool,
+        popular_failed: bool,
         behavior_insufficient: bool = False,
     ) -> str | None:
         if onboarding_failed:
@@ -183,6 +208,8 @@ class RetrievalService:
             return "behavior_failed"
         if breaking_failed:
             return "breaking_failed"
+        if popular_failed:
+            return "popular_failed"
         if behavior_insufficient:
             return "behavior_insufficient"
         return None

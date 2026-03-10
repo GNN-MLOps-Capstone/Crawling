@@ -6,6 +6,7 @@
 - 이 문서는 추천 API에서 "무엇을 만들 것인가"를 정리하는 상위 스펙 문서다.
 - 구현 작업, 테스트 순서, 운영 체크리스트는 [recommendation_api_operations_draft.md](/home/dobi/Crawling/docs/recommendation_api_operations_draft.md)에서 관리한다.
 - 현재 코드와 문서가 다르면, 구현 전까지의 실제 동작은 코드 기준으로 본다.
+- 추천 API의 실행/검증 기준 환경은 로컬 호스트 Python보다 `docker-compose.yaml` 기반 컨테이너 환경을 우선한다.
 
 ## 1. Background And Problem
 
@@ -20,7 +21,7 @@
 
 - 엔드포인트는 `POST /recommend/news`다.
 - FastAPI 추천 API는 이미 존재한다.
-- 현재는 개인화 없이 최신 뉴스 `news_id`를 cursor 기반으로 반환하는 mock 단계에서 확장 중이다.
+- 현재는 `request_id` 기반 세션 캐시와 cursor pagination 위에서 `A1(온보딩) + A2(행동) + B(속보)` 구조를 부분 반영한 상태다.
 - 세션 캐시, fallback, 구조화 로그는 들어가고 있으나 경로 정의와 품질 측정은 더 정리할 필요가 있다.
 
 ### v1 목표
@@ -78,20 +79,22 @@
 | Path A1 | 온보딩 기반 추천 | 가입 시 선택한 관심사(키워드/종목) 집합을 query로 사용하고, 평균 대신 Late Interaction(Max-Sim)으로 매칭 | RDBMS |
 | Path A2 | 로그 기반 추천 | 최근 20개 클릭/유효 읽기 로그의 키워드/종목에 대해 시간 감쇠와 Late Interaction(Max-Sim)을 적용 | RDBMS |
 | Path B | 최신 속보 | 짧은 시간창의 속보 기사 우선 추출 | RDBMS |
-| Path C | 인기 탐색 | CTR, 최근성, 편중 제어를 함께 반영한 인기 기사 후보를 생성 | RDBMS + 집계 로그 |
+| Path C | 인기 탐색 | Airflow가 약 `10분`마다 갱신하는 뉴스 집계 테이블과 popularity snapshot을 읽어 후보를 구성한다 | Aggregate Table + Snapshot Table |
 
 - `Path C`는 기존 멀티 패스 구조의 정식 경로로 유지한다.
+- `Path C`의 후보 계산 책임은 FastAPI가 아니라 Airflow 배치에 둔다.
+- popularity 관련 온라인 지표는 API가 실시간 계산하지 않고, Airflow가 집계 테이블에 누적한다.
 - 1A 초기 구현은 `A1`과 `B`를 우선 올리고, `A2`와 `C`는 내부 데이터 조회 경로와 큐 구조를 먼저 고정한 뒤 후속 단계에서 활성화한다.
 - `A1`은 cold start 대응의 기본 exploitation 경로다.
 - `A2`는 행동 데이터가 충분한 사용자에게 우선 적용되는 warm path다.
 - `B`는 freshness 보강과 탐색 역할을 맡는다.
-- `C`는 인기 기반 exploration을 담당하되, recency와 카테고리 편중 제어를 함께 가져가야 한다.
+- `C`는 인기 기반 exploration을 담당하되, recency와 카테고리 편중 제어를 반영한 snapshot을 읽는 read-only path로 운영한다.
 
 #### User Signal Loading Principle
 
 - 추천 서버는 `user_id`를 기준으로 필요한 사용자 신호를 직접 조회한다.
 - 외부 요청의 기본 계약은 최소한의 서빙 파라미터만 유지한다.
-  - `user_id`
+  - `user_id`: `integer`
   - `limit`
   - `cursor`
   - `request_id`
@@ -101,7 +104,7 @@
   - 온보딩 종목: `watchlist(user_id, stock_id)`
   - 온보딩 키워드: `user_onboarding_keywords(user_id, keyword_id)`
   - 벡터 조회: `test_service_embeddings(entity_id, entity_type, gnn_embedding)`
-  - 행동 로그: `interaction_events(user_id, event_type, news_id, content_session, event_ts_client, ...)`
+  - 행동 로그: `interaction_events(user_id, event_type, news_id, content_session_id, event_ts_client, ...)`
   - 뉴스-엔터티 매핑: `news_keyword_mapping(news_id, keyword_id)`, `news_stock_mapping(news_id, stock_id)`
 
 #### 상세 스펙: A1 & A2 Logic Definition
@@ -121,9 +124,9 @@
 - Path A2
   - `Input Scope`: `user_id` 기준으로 조회한 최근 20개 클릭/유효 읽기 로그만 사용한다.
   - `Source`: `interaction_events`
-  - `Noise Filter`: 체류 시간 `10초` 미만 로그는 제외한다.
-  - `Event Definition`: `content_view`를 뉴스 진입, `content_leave`를 뉴스 이탈로 보고, 같은 `content_session` 값으로 연결한다.
-  - `Dwell Time`: `content_view.event_ts_client`와 `content_leave.event_ts_client` 차이로 계산한다.
+  - `Noise Filter`: 체류 시간 `5초` 미만 로그는 제외한다.
+  - `Event Definition`: 현재 구현은 `content_open`을 뉴스 진입, `content_leave`를 뉴스 이탈로 보고, 같은 `content_session_id` 값으로 연결한다.
+  - `Dwell Time`: `content_open.event_ts_client`와 `content_leave.event_ts_client` 차이로 계산한다.
   - `Time Reference`: 최신성 계산과 정렬에는 `event_ts_client`를 우선 사용하고, `event_ts_server`는 보조 검증용으로 사용한다.
   - `Log Structure`: 로그 1개는 `{ timestamp, news_id, extracted_keywords[], extracted_stock_entities[] }`를 기본 단위로 본다.
   - `Grouping`: 20개 로그에서 추출된 키워드를 유니크 키워드 단위로 압축하되, 원시 출현 빈도는 유지한다.
@@ -133,6 +136,57 @@
   - `Entity Reconstruction`: `news_id`로 `news_keyword_mapping`, `news_stock_mapping`을 조회해 키워드/종목 엔터티를 복원한다.
   - `Embedding Join Rule`: 복원된 `keyword_id`, `stock_id`도 문자열 기준으로 `test_service_embeddings.entity_id`와 비교하되, 각각 `entity_type='keyword'`, `entity_type='stock'`를 함께 지정한다.
 
+#### 상세 스펙: Path C Snapshot Definition
+
+- 목적
+  - `Path C`는 실시간 개인화가 아니라 안정적인 exploration pool 제공이 목적이다.
+  - 요청 시점마다 popularity를 다시 계산하지 않고, 가장 최신 snapshot을 읽어 서빙에 사용한다.
+- 배치 집계 선행 원칙
+  - snapshot 계산 전에 `news_id` 기준 집계 테이블을 먼저 갱신한다.
+  - 집계 테이블은 CTR 자체보다 CTR 계산 재료가 되는 count를 저장한다.
+- 계산 책임 분리
+  - Airflow는 약 `10분`마다 뉴스 집계 테이블과 popularity snapshot을 계산하고 저장한다.
+  - FastAPI는 집계 결과와 snapshot을 read-only로 조회하고, exclude/served filter와 path mixing만 담당한다.
+- 추천 이유
+  - 인기 점수 계산을 요청 latency에서 분리한다.
+  - 같은 시간창에서는 모든 사용자가 동일한 인기 후보 풀을 보게 해 디버깅과 품질 비교를 단순화한다.
+  - popularity 산식 변경, cap 조정, backfill, Bayesian smoothing 적용을 DAG 레벨에서 관리할 수 있다.
+- 입력 source
+  - 기본 로그 source는 기존 `interaction_events` 단일 테이블이다.
+  - recommendation impression/click도 별도 원천 테이블을 만들기보다 `interaction_events` 안에서 관리하는 방향을 우선한다.
+  - 기사 메타데이터는 `naver_news`, `filtered_news`와 함께 본다.
+- 집계 테이블 계약
+  - `news_id` 기준으로 최소 아래 count를 저장한다.
+    - `total_impression_count`
+    - `total_click_count`
+    - `a1_impression_count`
+    - `a1_click_count`
+    - `a2_impression_count`
+    - `a2_click_count`
+    - `b_impression_count`
+    - `b_click_count`
+    - `c_impression_count`
+    - `c_click_count`
+  - 필요 시 `valid_dwell_count`, `window_start`, `window_end`, `last_event_at` 같은 필드를 확장할 수 있다.
+- 산출물 계약
+  - snapshot 저장소는 최소한 아래 필드를 가져야 한다.
+    - `snapshot_at`
+    - `news_id`
+    - `score`
+    - `rank`
+    - `domain`
+    - `category`
+  - 필요 시 `window_start`, `window_end`, `aggregate_snapshot_at`, `ctr_proxy` 같은 디버깅 필드를 추가할 수 있다.
+- 점수 원칙
+  - popularity는 집계 테이블의 count를 바탕으로 계산한다.
+  - 초기 점수는 raw count, smoothed CTR, recency를 조합하는 방식으로 정의할 수 있다.
+  - Bayesian smoothing 같은 보정은 count가 저장돼 있어야 쉽게 적용할 수 있다.
+  - 특정 도메인 또는 카테고리 과집중을 막기 위한 cap 또는 penalty를 snapshot 계산 단계에서 적용한다.
+  - API에서는 snapshot 점수를 재계산하지 않는다.
+- 장애 대응
+  - 최신 snapshot이 없으면 직전 snapshot을 읽을 수 있어야 한다.
+  - snapshot 조회까지 실패하면 `Path C`는 비활성화하고 `B` 또는 latest fallback으로 degrade 한다.
+
 ### 3.3 Stage 3. Mixing And Exploration
 
 - 목적: 최종 노출 리스트를 exploitation과 freshness가 공존하는 형태로 구성한다.
@@ -140,7 +194,11 @@
   - `A1`은 cold start와 온보딩 기반 개인화의 기본 경로다.
   - `A2`는 warm user에서 우세한 개인화 경로다.
   - `B`는 freshness 보강과 exploration을 담당한다.
-  - `C`는 popularity 기반 exploration과 안전한 다양성 보강을 담당한다.
+  - `C`는 Airflow snapshot 기반 popularity exploration과 안전한 다양성 보강을 담당한다.
+- `MAB`의 역할은 개별 기사 점수를 다시 매기는 ranker가 아니라, `A1/A2/B/C` path를 어떤 비율로 섞을지 정하는 blender다.
+- `MAB`의 arm은 `A1`, `A2`, `B`, `C` 네 개 path다.
+- `MAB`의 action은 페이지 또는 배치 단위 슬롯을 순차적으로 sampling해 path allocation을 형성하는 것이다.
+- 각 path 내부의 후보 생성과 정렬은 retrieval 계층이 담당하고, `MAB`는 최종 노출 슬롯의 path별 배분만 담당한다.
 - 최종 노출 비율은 장기적으로 `MAB`가 결정한다.
 - 다만 초기 운영에서는 아래를 먼저 둔다.
   - 고정 또는 준고정 mix ratio
@@ -157,6 +215,7 @@
   - 세션 캐시에는 `request_id` 기준으로 `onboarding/behavior/breaking/popular queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
   - 다음 페이지 요청은 현재 mix policy에 따라 각 queue에서 필요한 개수만큼 꺼내 page를 합성한다.
   - prefetch는 전체 잔량이 아니라 primary path 병목 기준으로 판단한다.
+  - `popular queue`는 실시간 집계 결과가 아니라 snapshot 조회 결과를 기준으로 채운다.
 - 기대 효과
   - 같은 세션 안에서 결과 순서가 안정적으로 유지된다.
   - 페이지 이동 시 재조회 부담을 줄인다.
@@ -170,10 +229,15 @@
 - 최소 응답 필드
   - `request_id`
   - `items[].news_id`
+  - `items[].path`
   - `next_cursor`
   - `meta.source`
   - `meta.fallback_used`
+  - `meta.fallback_reason`
 - 요청 필드는 `user_id` 중심으로 최소화하고, 추천 서버가 내부적으로 사용자 신호를 조회하는 구조를 기본으로 한다.
+- `user_id` 요청 타입은 문자열이 아니라 `integer`다.
+- `items[].path`는 각 뉴스가 `A1`, `A2`, `B`, `C` 중 어느 path에서 왔는지 나타내는 서빙 계약이다.
+- 클라이언트는 click 또는 read 완료 로그를 보낼 때 해당 `source_path`를 함께 전달해야 한다.
 
 ### 4.2 Session And Pagination
 
@@ -192,14 +256,29 @@
 ### 4.4 Bandit Principle
 
 - 최종 노출 슬롯의 Path별 배분은 `MAB`가 결정하는 것을 원칙으로 한다.
+- `MAB`는 개별 기사의 세부 순위를 다시 계산하지 않는다. path별 후보 큐가 준비된 뒤, 어떤 path에서 몇 개를 꺼낼지를 정하는 blender로 동작한다.
+- 1차 알고리즘은 `global prior + user posterior` 구조의 경량 `Hierarchical Thompson Sampling`으로 정의한다.
+- 각 arm은 `A1`, `A2`, `B`, `C` path이며, 각 슬롯에서 arm별 성공 확률을 sampling해 다음 path를 선택한다.
+- 여러 슬롯에서의 sequential sampling 결과가 페이지 단위 allocation을 형성한다.
 - 사람이 직접 고정하는 값은 최종 mix가 아니라 다음 항목이다.
   - 초기 prior
   - 최소/최대 가드레일
   - 비활성화 시 fallback 비율
+- cold start 사용자는 최근 `3일` 기준 전체 유저의 path별 평균 reward를 바탕으로 한 global prior를 사용한다.
+- 사용자별 click/유효 체류 로그가 쌓일수록 user posterior의 영향이 커지고, global prior의 영향은 regularizer 수준으로 줄어든다.
+- prior는 cold/warm을 완전히 분리하지 않고 공통 prior를 사용하되, user state별 guardrail만 다르게 적용한다.
+- 시간 경과에 따라 과거 취향에 과도하게 고정되지 않도록 `alpha`, `beta` 누적값에는 시간 감쇠를 적용한다.
+- 시간 감쇠는 서빙 시점 실시간 계산이 아니라, 배치 업데이트 시 decay가 반영된 `alpha`, `beta`를 저장하는 것을 원칙으로 한다.
+- primary reward는 `5초 이상 유효 체류(valid dwell)`로 정의하고, 단순 click은 secondary metric으로 함께 본다.
+- reward attribution은 `items[].path`와 click/read 로그의 `source_path`를 연결해 수행한다.
+- `items[].path`는 MAB 학습을 위한 필수 필드이며, click/read 로그에도 반드시 포함돼야 한다.
+- 서빙 계층은 `Redis`에 저장된 user별 `alpha`, `beta`를 read-only로 조회해 sampling만 수행하고, 학습 업데이트는 배치 계층이 담당한다.
+- 배치 계층의 기본 update cadence는 `1시간`으로 둔다.
 - 초기에는 `A1/A2/B/C` 경로를 모두 MAB 대상 후보로 보되, 아래 규칙을 둔다.
   - `A2`는 행동 데이터가 충분할 때만 활성화
   - cold user는 `A1 + B` 중심
   - `A1/A2` 모두 약하면 `B`와 `C` 비중 확대
+- `A2`가 비활성화되거나 특정 path queue가 고갈되면 해당 arm은 sampling 대상에서 제외하고, 남은 arm에 guardrail을 다시 적용한다.
 
 ### 4.5 Fallback Principle
 
@@ -209,6 +288,7 @@
 - `A1/A2`가 모두 실패하면 `B + C` 중심 fallback을 사용한다.
 - 리트리벌, MAB, 캐시에 문제가 생겨도 앱 화면에는 fallback 결과가 반환되어야 한다.
 - fallback은 빈 화면보다 `latest/breaking/popular` 조합을 우선한다.
+- `Path C` snapshot이 비어 있거나 stale하면 `C`를 끄고 `B` 비중을 늘리는 방식으로 degrade 한다.
 
 ### 4.6 Cold Start Principle
 
@@ -239,7 +319,18 @@
   - `Fallback Rate`
   - `Bandit Allocation Share`
 
-### 5.3 Offline Evaluation
+### 5.3 Aggregation Principle
+
+- CTR은 API에서 실시간 계산하지 않는다.
+- Airflow가 주기적으로 `news_id` 기준 집계 테이블을 갱신하고, 서빙/배치 계산은 그 결과를 읽는다.
+- 집계 테이블은 `CTR 값`보다 `count 값`을 우선 저장한다.
+- 이유는 아래와 같다.
+  - 계산식 변경 시 재사용성이 높다.
+  - overall CTR, path CTR, smoothed CTR을 필요에 따라 다시 계산할 수 있다.
+  - path별 노출 수가 적을 때 Bayesian smoothing, threshold, backoff를 적용하기 쉽다.
+- 현재 단계에서는 모든 path에 대한 정교한 CTR 활용보다, `Path C`와 이후 MAB가 공통으로 재사용할 수 있는 count 집계를 먼저 두는 것을 우선한다.
+
+### 5.4 Offline Evaluation
 
 - 최신순 baseline 대비 품질 차이를 점검할 수 있어야 한다.
 - 오프라인 점검에서는 아래 항목을 함께 본다.
@@ -248,7 +339,7 @@
   - 최신성
   - 안정성
 
-### 5.4 Qualitative Success
+### 5.5 Qualitative Success
 
 - 특정 카테고리 편중만 심한 결과가 아니라, 온보딩 기반 추천, 로그 기반 추천, 최신 속보, 인기 탐색이 의도한 비율로 함께 노출되어야 한다.
 - 사용자는 추천 피드가 "전부 최신 기사만 나열된 화면" 또는 "내 취향만 과도하게 반복되는 화면"처럼 느껴지지 않아야 한다.
@@ -256,9 +347,11 @@
 ## 6. Open Product Decisions
 
 - prefetch 임계치를 남은 몇 개 기준으로 둘지
-- 초기 MAB를 path 단위로만 둘지, 슬롯 단위까지 세분화할지
 - 추천 서버가 조회할 사용자 신호 source를 실시간 조회로 둘지, 일부 사전 집계 테이블로 둘지
-- `C`의 popularity 정의에 recency와 diversity penalty를 어떻게 섞을지
+- `Path C` snapshot을 `10분` 고정 cadence로 둘지, 운영 후 `5분` 또는 `30분`으로 조정할지
+- 집계 테이블을 wide table(`news_id` + path별 count 컬럼)로 둘지, long table(`news_id`, `path`, `count`)로 둘지
+- `C`의 popularity 정의에 raw count, smoothed CTR, recency를 어떻게 섞을지
+- snapshot 저장소를 별도 테이블로 둘지, materialized view 또는 key-value cache로 둘지
 - `keyword-keyword`, `stock-stock`, `keyword-stock` pair type별 similarity calibration을 어떤 방식으로 둘지
 - Max-Sim 연산에서 `keyword vector score`와 `entity hard match score`의 가중치 비율을 어떻게 둘지
 - 최신성 decay 함수를 `exp`, `half-life`, 구간 감쇠 중 어떤 형태로 둘지

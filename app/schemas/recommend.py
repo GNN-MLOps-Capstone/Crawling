@@ -5,16 +5,29 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.config import settings
 
 
+class RecommendDebugContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    profile: dict[str, Any] | None = None
+    recent_actions: list[dict[str, Any]] | None = None
+    session_signals: dict[str, Any] | None = None
+
+
 class RecommendNewsRequest(BaseModel):
-    user_id: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
     limit: int = Field(ge=1, le=settings.default_limit_max)
     cursor: str | None = None
     request_id: str | None = None
-    context: dict[str, Any] = Field(default_factory=dict)
+    # Debug-only override. Normal recommendation flow loads user signals internally by user_id.
+    context: RecommendDebugContext = Field(default_factory=RecommendDebugContext)
 
 
 class RecommendNewsItem(BaseModel):
     news_id: int
+    path: str
 
 
 class RecommendNewsMeta(BaseModel):
@@ -30,3 +43,16 @@ class RecommendNewsResponse(BaseModel):
     items: list[RecommendNewsItem]
     next_cursor: str | None
     meta: RecommendNewsMeta
+
+
+class RecommendClickRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1)
+    user_id: int
+    news_id: int
+    rank: int | None = Field(default=None, ge=1)
+
+
+class RecommendClickResponse(BaseModel):
+    status: str

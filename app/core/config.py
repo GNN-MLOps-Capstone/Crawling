@@ -20,6 +20,7 @@ class Settings:
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_password: str | None = os.getenv("REDIS_PASSWORD")
     session_cache_ttl_seconds: int = int(os.getenv("RECO_SESSION_TTL_SECONDS", "1800"))
+    session_stale_after_seconds: int = int(os.getenv("RECO_SESSION_STALE_AFTER_SECONDS", "900"))
     base_pool_hours: int = int(os.getenv("RECO_BASE_POOL_HOURS", "72"))
     onboarding_hours: int = int(os.getenv("RECO_ONBOARDING_HOURS", os.getenv("RECO_PATH_A_HOURS", "72")))
     behavior_hours: int = int(os.getenv("RECO_BEHAVIOR_HOURS", "72"))
@@ -27,6 +28,7 @@ class Settings:
     onboarding_candidate_limit: int = int(os.getenv("RECO_ONBOARDING_LIMIT", os.getenv("RECO_PATH_A_LIMIT", "50")))
     behavior_candidate_limit: int = int(os.getenv("RECO_BEHAVIOR_LIMIT", "50"))
     breaking_candidate_limit: int = int(os.getenv("RECO_BREAKING_LIMIT", os.getenv("RECO_PATH_B_LIMIT", "30")))
+    popular_candidate_limit: int = int(os.getenv("RECO_POPULAR_LIMIT", "30"))
     behavior_action_limit: int = int(os.getenv("RECO_BEHAVIOR_ACTION_LIMIT", "20"))
     valid_read_dwell_seconds: int = int(os.getenv("RECO_VALID_READ_DWELL_SECONDS", "10"))
     retrieval_candidate_pool_multiplier: int = int(os.getenv("RECO_RETRIEVAL_CANDIDATE_POOL_MULTIPLIER", "4"))
@@ -42,6 +44,7 @@ class Settings:
     onboarding_mix_weight: int = int(os.getenv("RECO_ONBOARDING_MIX_WEIGHT", "2"))
     behavior_mix_weight: int = int(os.getenv("RECO_BEHAVIOR_MIX_WEIGHT", "2"))
     breaking_mix_weight: int = int(os.getenv("RECO_BREAKING_MIX_WEIGHT", os.getenv("RECO_PATH_B_MIX_WEIGHT", "1")))
+    popular_mix_weight: int = int(os.getenv("RECO_POPULAR_MIX_WEIGHT", "1"))
     prefetch_primary_low_watermark: int = int(
         os.getenv("RECO_PREFETCH_PRIMARY_LOW_WATERMARK", os.getenv("RECO_PREFETCH_PATH_A_LOW_WATERMARK", "20"))
     )
@@ -49,6 +52,11 @@ class Settings:
     breaking_stale_cutoff_minutes: int = int(
         os.getenv("RECO_BREAKING_STALE_CUTOFF_MINUTES", os.getenv("RECO_PATH_B_STALE_CUTOFF_MINUTES", "120"))
     )
+    popular_hours: int = int(os.getenv("RECO_POPULAR_HOURS", "72"))
+    popular_snapshot_max_age_minutes: int = int(os.getenv("RECO_POPULAR_SNAPSHOT_MAX_AGE_MINUTES", "30"))
+    guardrail_first_page_window: int = int(os.getenv("RECO_GUARDRAIL_FIRST_PAGE_WINDOW", "10"))
+    guardrail_min_breaking_in_window: int = int(os.getenv("RECO_GUARDRAIL_MIN_BREAKING_IN_WINDOW", "1"))
+    guardrail_min_popular_in_window: int = int(os.getenv("RECO_GUARDRAIL_MIN_POPULAR_IN_WINDOW", "1"))
     blocked_domains: tuple[str, ...] = tuple(
         domain.strip()
         for domain in os.getenv("RECO_BLOCKED_DOMAINS", "").split(",")

@@ -20,7 +20,7 @@ class RequestLog:
     timestamp: float
     request_id: str
     session_id: str
-    user_id: str
+    user_id: int
     limit: int
     offset: int
     latency_ms: int
@@ -36,8 +36,10 @@ class RequestLog:
     onboarding_remaining: int
     behavior_remaining: int
     breaking_remaining: int
+    popular_remaining: int
     mix_ratio: dict[str, int]
     source: str
+    user_state: str
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ class ImpressionLog:
     timestamp: float
     request_id: str
     session_id: str
-    user_id: str
+    user_id: int
     news_id: int
     rank: int
     path: str
@@ -57,7 +59,7 @@ class ClickLog:
     timestamp: float
     request_id: str
     session_id: str
-    user_id: str
+    user_id: int
     news_id: int
     rank: int
     path: str
@@ -65,6 +67,14 @@ class ClickLog:
 
 def log_request(payload: RequestLog) -> None:
     logger.info("recommend_request %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
+
+
+def log_impression(payload: ImpressionLog) -> None:
+    logger.info("recommend_impression %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
+
+
+def log_click(payload: ClickLog) -> None:
+    logger.info("recommend_click %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
 
 
 def now_ts() -> float:

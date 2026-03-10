@@ -4,7 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
 from app.repositories.news_repository import NewsRepository
-from app.schemas.recommend import RecommendNewsRequest, RecommendNewsResponse
+from app.schemas.recommend import (
+    RecommendClickRequest,
+    RecommendClickResponse,
+    RecommendNewsRequest,
+    RecommendNewsResponse,
+)
 from app.services.context_builder import RecommendContextBuilder
 from app.services.cursor_service import CursorError
 from app.services.recommend_service import RecommendService
@@ -35,6 +40,8 @@ def get_recommend_service() -> RecommendService:
             onboarding_limit=settings.onboarding_candidate_limit,
             behavior_limit=settings.behavior_candidate_limit,
             breaking_limit=settings.breaking_candidate_limit,
+            popular_hours=settings.popular_hours,
+            popular_limit=settings.popular_candidate_limit,
             blocked_domains=settings.blocked_domains,
         ),
     )
@@ -62,3 +69,33 @@ def recommend_news(
                 }
             },
         ) from exc
+
+
+@router.post(
+    "/recommend/news/click",
+    response_model=RecommendClickResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def record_recommend_click(
+    request: RecommendClickRequest,
+    service: RecommendService = Depends(get_recommend_service),
+) -> RecommendClickResponse:
+    try:
+        service.record_click(
+            request_id=request.request_id,
+            user_id=request.user_id,
+            news_id=request.news_id,
+            rank=request.rank,
+        )
+    except CursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "code": "RECOMMENDATION_SESSION_NOT_FOUND",
+                    "message": str(exc),
+                    "request_id": request.request_id,
+                }
+            },
+        ) from exc
+    return RecommendClickResponse(status="accepted")

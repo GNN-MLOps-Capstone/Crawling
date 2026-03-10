@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.api.recommend import get_recommend_service
 from app.main import app
-from app.repositories.news_repository import NewsCandidate
+from app.repositories.news_repository import NewsCandidate, NewsRepository
 from app.schemas.recommend import RecommendNewsRequest
+import app.services.recommend_service as recommend_service_module
 from app.services.context_builder import RecommendContextBuilder
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
@@ -28,6 +29,7 @@ class FakeNewsRepository:
         self.news_entities_by_id: dict[int, dict[str, list[str]]] = {}
         self.entity_embeddings: dict[tuple[str, str], list[float]] = {}
         self.fetch_recent_candidates_calls: list[dict[str, object]] = []
+        self.popular_candidates: list[NewsCandidate] = []
 
     def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:
         return self.profiles_by_user_id.get(user_id, {})
@@ -82,7 +84,7 @@ class FakeNewsRepository:
         )
         del blocked_domains, stale_cutoff_minutes
         candidates: list[NewsCandidate] = []
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         for index, news_id in enumerate(self.news_ids):
             if news_id in exclude_ids:
                 continue
@@ -99,6 +101,23 @@ class FakeNewsRepository:
             if len(candidates) >= limit:
                 break
         return candidates
+
+    def fetch_popular_candidates(
+        self,
+        *,
+        limit: int,
+        hours: int,
+        exclude_ids: set[int],
+        blocked_domains: tuple[str, ...] = (),
+    ) -> list[NewsCandidate]:
+        del hours, blocked_domains
+        if self.popular_candidates:
+            return [
+                candidate
+                for candidate in self.popular_candidates
+                if candidate.news_id not in exclude_ids
+            ][:limit]
+        return []
 
 
 class PathBOnlyRepository(FakeNewsRepository):
@@ -143,6 +162,8 @@ def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
             onboarding_limit=50,
             behavior_limit=50,
             breaking_limit=30,
+            popular_hours=24,
+            popular_limit=30,
         ),
     )
     app.dependency_overrides[get_recommend_service] = lambda: service
@@ -151,7 +172,7 @@ def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
 
 def test_request_validation_limit_required() -> None:
     client = _client_with_ids([100, 99, 98])
-    response = client.post("/recommend/news", json={"user_id": "u1"})
+    response = client.post("/recommend/news", json={"user_id": 1})
     assert response.status_code == 422
 
 
@@ -160,7 +181,7 @@ def test_cursor_limit_mismatch_returns_400() -> None:
 
     first = client.post(
         "/recommend/news",
-        json={"user_id": "u1", "limit": 2, "request_id": "req-1"},
+        json={"user_id": 1, "limit": 2, "request_id": "req-1"},
     )
     assert first.status_code == 200
     cursor = first.json()["next_cursor"]
@@ -168,7 +189,7 @@ def test_cursor_limit_mismatch_returns_400() -> None:
 
     second = client.post(
         "/recommend/news",
-        json={"user_id": "u1", "limit": 3, "cursor": cursor},
+        json={"user_id": 1, "limit": 3, "cursor": cursor},
     )
     assert second.status_code == 400
     detail = second.json()["detail"]["error"]
@@ -178,44 +199,69 @@ def test_cursor_limit_mismatch_returns_400() -> None:
 def test_pagination_consistency_with_cursor() -> None:
     client = _client_with_ids([10, 9, 8, 7, 6])
 
-    first = client.post("/recommend/news", json={"user_id": "u1", "limit": 2})
+    first = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
     assert first.status_code == 200
     body1 = first.json()
     assert [item["news_id"] for item in body1["items"]] == [10, 9]
+    assert [item["path"] for item in body1["items"]] == ["A1", "A1"]
     assert body1["next_cursor"] is not None
 
     second = client.post(
         "/recommend/news",
-        json={"user_id": "u1", "limit": 2, "cursor": body1["next_cursor"]},
+        json={"user_id": 1, "limit": 2, "cursor": body1["next_cursor"]},
     )
     assert second.status_code == 200
     body2 = second.json()
     assert [item["news_id"] for item in body2["items"]] == [8, 7]
+    assert [item["path"] for item in body2["items"]] == ["A1", "A1"]
     assert body2["request_id"] == body1["request_id"]
 
 
 def test_response_contains_multipath_meta_fields() -> None:
     client = _client_with_ids([21, 20, 19, 18])
 
-    response = client.post("/recommend/news", json={"user_id": "u1", "limit": 2, "context": {}})
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2, "context": {}})
 
     assert response.status_code == 200
     meta = response.json()["meta"]
     assert meta["source"] == "multipath_cold"
     assert meta["fallback_used"] is False
-    assert meta["fallback_reason"] == "user_signal_lookup_failed"
+    assert meta["fallback_reason"] == "profile_missing"
+
+
+def test_response_items_include_public_path_codes() -> None:
+    client = _client_with_ids([21, 20, 19, 18])
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2, "context": {}})
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {"news_id": 21, "path": "A1"},
+        {"news_id": 20, "path": "A1"},
+    ]
+
+
+def test_profile_missing_fallback_reason_when_internal_signals_are_empty() -> None:
+    client = _client_with_repository(FakeNewsRepository([21, 20, 19, 18]))
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+
+    assert response.status_code == 200
+    meta = response.json()["meta"]
+    assert meta["source"] == "multipath_cold"
+    assert meta["fallback_reason"] == "profile_missing"
 
 
 def test_primary_failure_falls_back_to_breaking() -> None:
     client = _client_with_repository(PathBOnlyRepository([21, 20, 19, 18]))
 
-    response = client.post("/recommend/news", json={"user_id": "u1", "limit": 2, "context": {}})
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2, "context": {}})
 
     assert response.status_code == 200
     body = response.json()
     assert [item["news_id"] for item in body["items"]] == [21, 20]
     assert body["meta"]["fallback_used"] is True
-    assert body["meta"]["fallback_reason"] == "primary_failed_use_breaking"
+    assert body["meta"]["fallback_reason"] == "primary_failed_use_exploration"
 
 
 def test_behavior_path_activates_when_recent_actions_exist() -> None:
@@ -235,7 +281,7 @@ def test_behavior_path_activates_when_recent_actions_exist() -> None:
     response = client.post(
         "/recommend/news",
         json={
-            "user_id": "1",
+            "user_id": 1,
             "limit": 4,
         },
     )
@@ -257,7 +303,7 @@ def test_single_recent_action_is_not_enough_for_warm_behavior_path() -> None:
     response = client.post(
         "/recommend/news",
         json={
-            "user_id": "1",
+            "user_id": 1,
             "limit": 4,
         },
     )
@@ -274,7 +320,7 @@ def test_context_override_still_works_for_debug_requests() -> None:
     response = client.post(
         "/recommend/news",
         json={
-            "user_id": "u1",
+            "user_id": 1,
             "limit": 4,
             "context": {
                 "profile": {"interests": ["stocks"]},
@@ -290,6 +336,21 @@ def test_context_override_still_works_for_debug_requests() -> None:
     body = response.json()
     assert [item["news_id"] for item in body["items"]] == [30, 29, 28, 27]
     assert body["meta"]["source"] == "multipath_warm"
+
+
+def test_context_schema_rejects_unknown_fields() -> None:
+    client = _client_with_ids([30, 29, 28, 27])
+
+    response = client.post(
+        "/recommend/news",
+        json={
+            "user_id": 1,
+            "limit": 2,
+            "context": {"unexpected": True},
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_onboarding_personalized_scoring_reorders_candidates() -> None:
@@ -312,7 +373,7 @@ def test_onboarding_personalized_scoring_reorders_candidates() -> None:
     }
     client = _client_with_repository(repository)
 
-    response = client.post("/recommend/news", json={"user_id": "1", "limit": 3})
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 3})
 
     assert response.status_code == 200
     assert [item["news_id"] for item in response.json()["items"]] == [102, 101, 103]
@@ -361,9 +422,11 @@ def test_behavior_personalized_scoring_uses_recent_action_entities() -> None:
         onboarding_limit=50,
         behavior_limit=50,
         breaking_limit=30,
+        popular_hours=24,
+        popular_limit=30,
     )
     context = RecommendContextBuilder().build(
-        user_id="1",
+        user_id=1,
         raw_context={},
         repository=repository,
     )
@@ -410,9 +473,11 @@ def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
         onboarding_limit=2,
         behavior_limit=2,
         breaking_limit=1,
+        popular_hours=24,
+        popular_limit=2,
     )
     context = RecommendContextBuilder().build(
-        user_id="1",
+        user_id=1,
         raw_context={},
         repository=repository,
     )
@@ -428,20 +493,20 @@ def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
 def test_replayed_cursor_returns_same_page() -> None:
     client = _client_with_ids([10, 9, 8, 7, 6])
 
-    first = client.post("/recommend/news", json={"user_id": "u1", "limit": 2})
+    first = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
     assert first.status_code == 200
     cursor = first.json()["next_cursor"]
     assert cursor is not None
 
     second = client.post(
         "/recommend/news",
-        json={"user_id": "u1", "limit": 2, "cursor": cursor},
+        json={"user_id": 1, "limit": 2, "cursor": cursor},
     )
     assert second.status_code == 200
 
     replay = client.post(
         "/recommend/news",
-        json={"user_id": "u1", "limit": 2, "cursor": cursor},
+        json={"user_id": 1, "limit": 2, "cursor": cursor},
     )
     assert replay.status_code == 200
     assert replay.json()["request_id"] == second.json()["request_id"]
@@ -465,11 +530,13 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
             onboarding_limit=50,
             behavior_limit=50,
             breaking_limit=30,
+            popular_hours=24,
+            popular_limit=30,
         ),
     )
 
     first = service.recommend_news(
-        RecommendNewsRequest(user_id="u1", limit=40, request_id="r1", context={})
+        RecommendNewsRequest(user_id=1, limit=40, request_id="r1", context={})
     )
     assert first.next_cursor is not None
     session = service.session_cache.get("r1")
@@ -477,7 +544,7 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
     assert len(session.timeline_ids) == 80
 
     second = service.recommend_news(
-        RecommendNewsRequest(user_id="u1", limit=40, cursor=first.next_cursor, context={})
+        RecommendNewsRequest(user_id=1, limit=40, cursor=first.next_cursor, context={})
     )
     assert second.next_cursor is not None
     session = service.session_cache.get("r1")
@@ -485,6 +552,179 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
     assert session.prefetched_timeline_ids
 
     third = service.recommend_news(
-        RecommendNewsRequest(user_id="u1", limit=40, cursor=second.next_cursor, context={})
+        RecommendNewsRequest(user_id=1, limit=40, cursor=second.next_cursor, context={})
     )
     assert len(third.items) == 40
+
+
+def test_stale_session_is_restored_for_cursor_pagination() -> None:
+    repository = FakeNewsRepository(list(range(20, 0, -1)))
+    service = RecommendService(
+        repository=repository,
+        session_cache=InMemorySessionCache(),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=10,
+            behavior_limit=10,
+            breaking_limit=5,
+            popular_hours=24,
+            popular_limit=5,
+        ),
+    )
+
+    first = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=3, request_id="stale-1", context={})
+    )
+    assert first.next_cursor is not None
+    session = service.session_cache.get("stale-1")
+    assert session is not None
+    session.last_served_at = session.last_served_at - (recommend_service_module.settings.session_stale_after_seconds + 1)
+    service.session_cache.set("stale-1", session, recommend_service_module.settings.session_cache_ttl_seconds)
+
+    second = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=3, cursor=first.next_cursor, context={})
+    )
+
+    assert len(second.items) == 3
+    assert second.meta.fallback_used is True
+    assert second.meta.fallback_reason == "stale_session_restored"
+
+
+def test_mix_guardrail_promotes_breaking_and_popular_into_first_window() -> None:
+    entries = [
+        (101, "onboarding"),
+        (102, "onboarding"),
+        (103, "behavior"),
+        (104, "behavior"),
+        (105, "onboarding"),
+        (106, "behavior"),
+        (107, "onboarding"),
+        (108, "behavior"),
+        (109, "onboarding"),
+        (110, "behavior"),
+        (201, "breaking"),
+        (301, "popular"),
+    ]
+
+    guarded = RecommendService._apply_mix_guardrails(entries)
+    first_window_paths = [path for _, path in guarded[: recommend_service_module.settings.guardrail_first_page_window]]
+
+    assert "breaking" in first_window_paths
+    assert "popular" in first_window_paths
+
+
+def test_recommendation_response_emits_impression_logs(monkeypatch) -> None:
+    client = _client_with_ids([21, 20, 19, 18])
+    captured = []
+
+    monkeypatch.setattr(recommend_service_module, "log_impression", lambda payload: captured.append(payload))
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+
+    assert response.status_code == 200
+    assert len(captured) == 2
+    assert captured[0].news_id == 21
+    assert captured[0].rank == 1
+    assert captured[0].path == "onboarding"
+
+
+def test_click_endpoint_logs_path_from_served_session(monkeypatch) -> None:
+    client = _client_with_ids([21, 20, 19, 18])
+    captured = []
+
+    monkeypatch.setattr(recommend_service_module, "log_click", lambda payload: captured.append(payload))
+
+    first = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+    assert first.status_code == 200
+    body = first.json()
+
+    response = client.post(
+        "/recommend/news/click",
+        json={
+            "request_id": body["request_id"],
+            "user_id": 1,
+            "news_id": body["items"][0]["news_id"],
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "accepted"}
+    assert len(captured) == 1
+    assert captured[0].news_id == body["items"][0]["news_id"]
+    assert captured[0].rank == 1
+    assert captured[0].path == "onboarding"
+
+
+def test_popular_path_uses_snapshot_order() -> None:
+    repository = FakeNewsRepository([500, 499, 498, 497])
+    repository.popular_candidates = [
+        NewsCandidate(
+            news_id=500,
+            title="popular-500",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://alpha.com/500",
+            category="alpha.com",
+            domain="alpha.com",
+            score=10.0,
+        ),
+        NewsCandidate(
+            news_id=499,
+            title="popular-499",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://alpha.com/499",
+            category="alpha.com",
+            domain="alpha.com",
+            score=9.0,
+        ),
+        NewsCandidate(
+            news_id=498,
+            title="popular-498",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://alpha.com/498",
+            category="alpha.com",
+            domain="alpha.com",
+            score=8.0,
+        ),
+        NewsCandidate(
+            news_id=497,
+            title="popular-497",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://beta.com/497",
+            category="beta.com",
+            domain="beta.com",
+            score=7.0,
+        ),
+    ]
+    retrieval_service = RetrievalService(
+        repository=repository,
+        base_pool_hours=72,
+        onboarding_hours=72,
+        behavior_hours=72,
+        breaking_hours=2,
+        breaking_stale_cutoff_minutes=120,
+        onboarding_limit=0,
+        behavior_limit=0,
+        breaking_limit=0,
+        popular_hours=24,
+        popular_limit=3,
+    )
+    context = RecommendContextBuilder().build(
+        user_id=1,
+        raw_context={},
+        repository=repository,
+    )
+
+    retrieval = retrieval_service.retrieve(context=context, exclude_ids=set())
+
+    assert [item.news_id for item in retrieval.popular] == [499, 498, 497]
+
+
+def test_stale_popular_snapshot_is_treated_as_unavailable() -> None:
+    assert NewsRepository._is_stale_popular_snapshot(datetime.now(UTC) - timedelta(minutes=31)) is True
+    assert NewsRepository._is_stale_popular_snapshot(datetime.now(UTC) - timedelta(minutes=5)) is False

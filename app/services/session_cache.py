@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RecommendationSession:
     request_id: str
-    user_id: str
+    user_id: int
     limit: int
     timeline_ids: list[int]
     onboarding_queue: list[int]
     behavior_queue: list[int]
     breaking_queue: list[int]
+    popular_queue: list[int] = field(default_factory=list)
     served_ids: list[int] = field(default_factory=list)
     current_mix_policy: dict[str, int] = field(default_factory=dict)
     batch_generation_id: int = 1
@@ -33,6 +34,9 @@ class RecommendationSession:
     prefetched_onboarding_queue: list[int] = field(default_factory=list)
     prefetched_behavior_queue: list[int] = field(default_factory=list)
     prefetched_breaking_queue: list[int] = field(default_factory=list)
+    prefetched_popular_queue: list[int] = field(default_factory=list)
+    timeline_path_map: dict[int, str] = field(default_factory=dict)
+    prefetched_timeline_path_map: dict[int, str] = field(default_factory=dict)
     debug_context: dict[str, Any] = field(default_factory=dict)
     cache_key: str = ""
 

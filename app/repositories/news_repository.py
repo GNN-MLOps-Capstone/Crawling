@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import psycopg2
@@ -18,9 +18,82 @@ class NewsCandidate:
     category: str
     domain: str
     score: float | None = None
+    snapshot_at: datetime | None = None
 
 
 class NewsRepository:
+    def fetch_popular_candidates(
+        self,
+        *,
+        limit: int,
+        hours: int,
+        exclude_ids: set[int],
+        blocked_domains: tuple[str, ...] = (),
+    ) -> list[NewsCandidate]:
+        query = """
+            WITH latest_snapshot AS (
+                SELECT MAX(snapshot_at) AS snapshot_at
+                FROM recommendation_popular_snapshot
+            )
+            SELECT
+                rps.snapshot_at,
+                nn.news_id,
+                nn.title,
+                nn.pub_date,
+                nn.url,
+                COALESCE(rps.category, 'unknown') AS category,
+                COALESCE(rps.domain, 'unknown') AS domain,
+                rps.score
+            FROM recommendation_popular_snapshot rps
+            JOIN latest_snapshot ls
+              ON ls.snapshot_at = rps.snapshot_at
+            JOIN filtered_news fn
+              ON fn.news_id = rps.news_id
+            JOIN naver_news nn
+              ON nn.news_id = rps.news_id
+            WHERE nn.pub_date >= %s
+            ORDER BY rps.rank ASC, rps.score DESC, rps.news_id DESC
+            LIMIT %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (datetime.now(UTC) - timedelta(hours=hours), limit * 3))
+                rows = cur.fetchall()
+
+        candidates: list[NewsCandidate] = []
+        latest_snapshot_at: datetime | None = None
+        for snapshot_at, news_id, title, pub_date, url, category, domain, score in rows:
+            if latest_snapshot_at is None:
+                latest_snapshot_at = snapshot_at
+            normalized_news_id = int(news_id)
+            if normalized_news_id in exclude_ids:
+                continue
+            normalized_url = str(url or "")
+            normalized_domain = str(domain or "").strip() or urlparse(normalized_url).netloc.replace("www.", "") or "unknown"
+            if normalized_domain in blocked_domains:
+                continue
+            candidates.append(
+                NewsCandidate(
+                    news_id=normalized_news_id,
+                    title=str(title or ""),
+                    pub_date=pub_date,
+                    url=normalized_url,
+                    category=str(category or "unknown"),
+                    domain=normalized_domain,
+                    score=float(score) if score is not None else None,
+                    snapshot_at=snapshot_at,
+                )
+            )
+            if len(candidates) >= limit:
+                break
+
+        if not candidates or latest_snapshot_at is None:
+            return []
+        if self._is_stale_popular_snapshot(latest_snapshot_at):
+            return []
+        return candidates
+
     def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -263,6 +336,12 @@ class NewsRepository:
             user=settings.db_user,
             password=settings.db_password,
         )
+
+    @staticmethod
+    def _is_stale_popular_snapshot(snapshot_at: datetime) -> bool:
+        aware_snapshot_at = snapshot_at if snapshot_at.tzinfo is not None else snapshot_at.replace(tzinfo=UTC)
+        max_age = timedelta(minutes=settings.popular_snapshot_max_age_minutes)
+        return datetime.now(UTC) - aware_snapshot_at.astimezone(UTC) > max_age
 
     @staticmethod
     def _parse_embedding(raw_embedding: object) -> list[float]:
