@@ -237,6 +237,76 @@ class GeminiNewsAnalyzer:
 
         return processed_paths
 
+    def process_analysis_for_parquet(self, input_bucket: str, input_key: str, output_keys: dict):
+        print(f"🚀 [Gemini] Analyzing parquet: {input_key}", flush=True)
+
+        try:
+            obj = self.s3.get_object(Bucket=input_bucket, Key=input_key)
+            df = pd.read_parquet(io.BytesIO(obj['Body'].read()))
+            print(f"   ✅ Loaded {len(df)} rows.", flush=True)
+        except self.s3.exceptions.NoSuchKey:
+            print(f"⚠️ Data not found: {input_key}", flush=True)
+            return {}
+        except Exception as e:
+            print(f"❌ Error loading S3 data: {e}", flush=True)
+            return {}
+
+        stock_data, keyword_data, analysis_data = [], [], []
+        retryable_failed_ids = set()
+        permanent_failed_ids = set()
+        total_count = len(df)
+
+        for idx, row in df.iterrows():
+            if idx % 10 == 0 and total_count:
+                print(f"   Processing {idx}/{total_count} ({(idx / total_count) * 100:.1f}%) ...", flush=True)
+
+            text = row.get('refined_text', '')
+            if not text:
+                continue
+
+            res, summary, sentiment, fail_status, _ = self._analyze_with_retry(text)
+            if fail_status == 'failed_retryable':
+                retryable_failed_ids.add(int(row['news_id']))
+            elif fail_status == 'failed_permanent':
+                permanent_failed_ids.add(int(row['news_id']))
+
+            valid_stocks = self._validate_stocks(res.get('related_stocks', []))
+            for s in valid_stocks:
+                stock_data.append({
+                    'news_id': row['news_id'],
+                    'stock_id': s['stock_id'],
+                    'stock_name': s['stock_name']
+                })
+
+            for k in res.get('keywords', []):
+                keyword_data.append({'news_id': row['news_id'], 'keyword': k})
+
+            analysis_data.append({
+                'news_id': row['news_id'],
+                'summary': summary,
+                'sentiment': sentiment
+            })
+
+        if retryable_failed_ids:
+            self._bulk_update_filter_status(retryable_failed_ids, 'failed_retryable', 'gemini_api_no_response')
+        if permanent_failed_ids:
+            self._bulk_update_filter_status(permanent_failed_ids, 'failed_permanent', 'invalid_analysis_format')
+
+        paths = {}
+        if stock_data and output_keys.get('stocks'):
+            self._save_parquet(stock_data, output_keys['stocks'])
+            paths['stocks'] = output_keys['stocks']
+
+        if keyword_data and output_keys.get('keywords'):
+            self._save_parquet(keyword_data, output_keys['keywords'])
+            paths['keywords'] = output_keys['keywords']
+
+        if analysis_data and output_keys.get('analysis'):
+            self._save_parquet(analysis_data, output_keys['analysis'])
+            paths['analysis'] = output_keys['analysis']
+
+        return paths
+
     def _save_parquet(self, data: list, key: str):
         df = pd.DataFrame(data)
         out_buf = io.BytesIO()
@@ -249,3 +319,16 @@ class GeminiNewsAnalyzer:
 def run_gemini_service(updated_dates: list, aws_info: dict, config_path: str, stock_map: dict, db_info: dict = None):
     analyzer = GeminiNewsAnalyzer(aws_info, config_path, stock_map, db_info=db_info)
     return analyzer.process_analysis(updated_dates)
+
+
+def run_gemini_service_for_parquet(
+    input_bucket: str,
+    input_key: str,
+    output_keys: dict,
+    aws_info: dict,
+    config_path: str,
+    stock_map: dict,
+    db_info: dict = None,
+):
+    analyzer = GeminiNewsAnalyzer(aws_info, config_path, stock_map, db_info=db_info)
+    return analyzer.process_analysis_for_parquet(input_bucket, input_key, output_keys)

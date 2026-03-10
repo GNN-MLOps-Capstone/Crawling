@@ -9,6 +9,8 @@ import pyarrow.parquet as pq
 import yaml
 from psycopg2.extras import execute_values
 
+from modules.ingestion.reader import read_news_by_time_window
+
 from modules.analysis.news_embedding import add_embeddings_to_df
 from modules.analysis.preprocessor import NewsPreProcessor
 
@@ -97,6 +99,234 @@ def _mark_failed_for_remaining(db_info: dict, remaining_ids, exc: Exception, fil
         filter_version=filter_version,
         reason=reason,
     )
+
+
+def _load_input_df_for_refinement(
+    aws_info: dict,
+    db_info: dict,
+    window_start: str | None = None,
+    window_end: str | None = None,
+    input_bucket: str | None = None,
+    input_key: str | None = None,
+):
+    if input_bucket and input_key:
+        s3_client = boto3.client(
+            "s3",
+            aws_access_key_id=aws_info["access_key"],
+            aws_secret_access_key=aws_info["secret_key"],
+            endpoint_url=aws_info["endpoint_url"],
+        )
+        response = s3_client.get_object(Bucket=input_bucket, Key=input_key)
+        return pd.read_parquet(io.BytesIO(response["Body"].read()))
+
+    if window_start and window_end:
+        return read_news_by_time_window(window_start, window_end, db_info)
+
+    raise ValueError("either input_bucket/input_key or window_start/window_end must be provided")
+
+
+def _run_refinement_for_df(
+    df: pd.DataFrame,
+    output_key: str,
+    aws_info: dict,
+    db_info: dict,
+    config_path: str,
+    target_news_ids: list[int] | None = None,
+):
+    s3_client = boto3.client(
+        "s3",
+        aws_access_key_id=aws_info["access_key"],
+        aws_secret_access_key=aws_info["secret_key"],
+        endpoint_url=aws_info["endpoint_url"],
+    )
+
+    ollama_host = "http://ollama:11434"
+    filter_version = _load_filter_version(config_path)
+    print(f"🧾 Using filter_version: {filter_version}")
+
+    if df.empty:
+        print("⚠️ No input rows for refinement.")
+        return None
+
+    if target_news_ids:
+        target_ids = {int(nid) for nid in target_news_ids}
+        df = df[df["news_id"].isin(target_ids)].copy()
+        print(f"🎯 Filtered target rows for refinement: {len(df)}")
+
+    if df.empty:
+        print("⚠️ No rows left after target filtering.")
+        return None
+
+    processing_ids = set()
+
+    try:
+        all_news_ids = set(df["news_id"].dropna().astype("int64").tolist())
+        processing_ids = set(all_news_ids)
+        moved = _update_filter_status(
+            db_info,
+            processing_ids,
+            "processing",
+            filter_version=filter_version,
+            reason="refinement_started",
+            allowed_from=("pending", "failed_retryable", "processing"),
+        )
+        print(f"  - Marked processing: {moved}")
+        print(f"  - Raw count: {len(df)}")
+
+        before_text_ids = set(df["news_id"].dropna().astype("int64").tolist())
+        df = df.dropna(subset=["text"]).copy()
+        after_text_ids = set(df["news_id"].dropna().astype("int64").tolist())
+        empty_text_ids = before_text_ids - after_text_ids
+        if empty_text_ids:
+            _update_filter_status(
+                db_info,
+                empty_text_ids,
+                "filtered_out",
+                filter_version=filter_version,
+                reason="empty_text",
+            )
+            processing_ids -= empty_text_ids
+
+        df["content_hash"] = df["text"].apply(_generate_content_hash)
+
+        before_dedup_ids = set(df["news_id"].dropna().astype("int64").tolist())
+        df = df.drop_duplicates(subset=["content_hash"], keep="first").copy()
+        after_dedup_ids = set(df["news_id"].dropna().astype("int64").tolist())
+        duplicate_in_batch_ids = before_dedup_ids - after_dedup_ids
+        if duplicate_in_batch_ids:
+            _update_filter_status(
+                db_info,
+                duplicate_in_batch_ids,
+                "skipped",
+                filter_version=filter_version,
+                reason="duplicate_in_batch",
+            )
+            processing_ids -= duplicate_in_batch_ids
+
+        if df.empty:
+            print("  💤 All rows filtered before DB hash check.")
+            return None
+
+        unique_hashes = df["content_hash"].dropna().unique().tolist()
+        target_hashes = set(unique_hashes)
+
+        with psycopg2.connect(**db_info) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM processed_content_hashes")
+                total_rows = cur.fetchone()[0]
+                print(f"  👀 [Debug] Total rows in DB table: {total_rows}")
+
+                if unique_hashes:
+                    cur.execute(
+                        "SELECT content_hash FROM processed_content_hashes WHERE content_hash IN %s",
+                        (tuple(unique_hashes),),
+                    )
+                    existing_hashes = {row[0] for row in cur.fetchall()}
+                else:
+                    existing_hashes = set()
+
+                print(f"  - Found {len(existing_hashes)} duplicates in DB.")
+                new_hashes_to_process = target_hashes - existing_hashes
+
+                if new_hashes_to_process:
+                    insert_query = """
+                        INSERT INTO processed_content_hashes (content_hash)
+                        VALUES %s
+                        ON CONFLICT (content_hash) DO NOTHING
+                    """
+                    execute_values(cur, insert_query, [(h,) for h in new_hashes_to_process])
+                    print(f"  - Registered {len(new_hashes_to_process)} new hashes to DB.")
+
+            conn.commit()
+
+        duplicate_processed_ids = set(
+            df[df["content_hash"].isin(existing_hashes)]["news_id"].dropna().astype("int64").tolist()
+        )
+        if duplicate_processed_ids:
+            _update_filter_status(
+                db_info,
+                duplicate_processed_ids,
+                "skipped",
+                filter_version=filter_version,
+                reason="duplicate_processed",
+            )
+            processing_ids -= duplicate_processed_ids
+
+        initial_count = len(df)
+        df = df[df["content_hash"].isin(new_hashes_to_process)].copy()
+        dropped_count = initial_count - len(df)
+        if dropped_count > 0:
+            print(f"  🔥 {dropped_count} duplicates skipped (Already processed).")
+
+        if df.empty:
+            print("  💤 All data in this batch has been processed before. Skipping.")
+            return None
+
+        processor = NewsPreProcessor()
+        df["refined_text"] = df["text"].apply(processor.clean_text_basic)
+        df["refined_text"] = df["refined_text"].apply(processor.is_english_only)
+
+        mask_sports = df["refined_text"].apply(processor.is_sports_news)
+        mask_short = df["refined_text"].str.len() <= 20
+        mask_filtered = mask_sports | mask_short
+        filtered_out_ids = set(df[mask_filtered]["news_id"].dropna().astype("int64").tolist())
+        if filtered_out_ids:
+            _update_filter_status(
+                db_info,
+                filtered_out_ids,
+                "filtered_out",
+                filter_version=filter_version,
+                reason="sports_or_too_short",
+            )
+            processing_ids -= filtered_out_ids
+
+        df_final = df[~mask_filtered].copy()
+        if df_final.empty:
+            print("  ⚠️ No valid data after filtering.")
+            return None
+
+        df_embedded = add_embeddings_to_df(df_final, model_name="bge-m3", host=ollama_host)
+
+        out_cols = ["news_id", "refined_text", "news_embedding", "pub_date"]
+        df_save = df_embedded[out_cols].copy()
+        df_save["news_id"] = df_save["news_id"].astype("int64")
+        df_save["pub_date"] = df_save["pub_date"].astype(str)
+
+        arrow_schema = pa.schema(
+            [
+                ("news_id", pa.int64()),
+                ("refined_text", pa.string()),
+                ("news_embedding", pa.list_(pa.float32())),
+                ("pub_date", pa.string()),
+            ]
+        )
+
+        out_buf = io.BytesIO()
+        table = pa.Table.from_pandas(df_save, schema=arrow_schema)
+        pq.write_table(table, out_buf, compression="SNAPPY")
+
+        s3_client.put_object(Bucket="silver", Key=output_key, Body=out_buf.getvalue())
+        print(f"✅ Saved: {output_key} ({len(df_save)} rows)")
+
+        passed_ids = set(df_save["news_id"].dropna().astype("int64").tolist())
+        if passed_ids:
+            _update_filter_status(db_info, passed_ids, "passed", filter_version=filter_version, reason=None)
+            processing_ids -= passed_ids
+
+        if processing_ids:
+            _update_filter_status(
+                db_info,
+                processing_ids,
+                "skipped",
+                filter_version=filter_version,
+                reason="not_selected_for_refinement",
+            )
+
+        return output_key
+    except Exception as e:
+        print(f"❌ Error during refinement: {e}")
+        _mark_failed_for_remaining(db_info, processing_ids, e, filter_version=filter_version)
+        raise
 
 
 def run_refinement_process(updated_dates: list, aws_info: dict, db_info: dict, config_path: str = DEFAULT_CONFIG_PATH):
@@ -304,3 +534,32 @@ def run_refinement_process(updated_dates: list, aws_info: dict, db_info: dict, c
             raise
 
     return processed_files
+
+
+def run_refinement_process_for_window(
+    window_start: str,
+    window_end: str,
+    aws_info: dict,
+    db_info: dict,
+    output_key: str,
+    config_path: str = DEFAULT_CONFIG_PATH,
+    input_bucket: str | None = None,
+    input_key: str | None = None,
+    target_news_ids: list[int] | None = None,
+):
+    df = _load_input_df_for_refinement(
+        aws_info=aws_info,
+        db_info=db_info,
+        window_start=window_start,
+        window_end=window_end,
+        input_bucket=input_bucket,
+        input_key=input_key,
+    )
+    return _run_refinement_for_df(
+        df=df,
+        output_key=output_key,
+        aws_info=aws_info,
+        db_info=db_info,
+        config_path=config_path,
+        target_news_ids=target_news_ids,
+    )

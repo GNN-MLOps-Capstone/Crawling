@@ -10,6 +10,8 @@ from airflow.datasets import Dataset
 from airflow.providers.docker.operators.docker import DockerOperator
 from docker.types import Mount
 
+from modules.snapshot_utils import select_latest_snapshot_on_or_before
+
 # [환경 설정]
 local_tz = pendulum.timezone("Asia/Seoul")
 MINIO_CONN_ID = 'MINIO_S3'
@@ -77,7 +79,12 @@ def trainset_pipeline():
         # 2. Snapshot 찾기
         s3_hook = S3Hook(aws_conn_id=MINIO_CONN_ID)
         kw_keys = s3_hook.list_keys(bucket_name=BUCKET_NAME, prefix="keyword_embeddings/date=")
-        latest_kw_snap = max([k for k in kw_keys if "keyword_embeddings.parquet" in k]) if kw_keys else None
+        latest_kw_snap = select_latest_snapshot_on_or_before(
+            kw_keys,
+            target_date_str,
+            prefix="keyword_embeddings/date=",
+            suffix="keyword_embeddings.parquet",
+        )
 
         st_keys = s3_hook.list_keys(bucket_name=BUCKET_NAME, prefix="stock_embeddings/")
         latest_st_snap = None
