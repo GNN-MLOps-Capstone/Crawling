@@ -83,6 +83,8 @@ class FakeNewsRepository:
             }
         )
         del blocked_domains, stale_cutoff_minutes
+        if limit <= 0:
+            return []
         candidates: list[NewsCandidate] = []
         now = datetime.now(UTC).replace(tzinfo=None)
         for index, news_id in enumerate(self.news_ids):
