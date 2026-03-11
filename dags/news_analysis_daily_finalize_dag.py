@@ -33,7 +33,7 @@ def news_analysis_daily_finalize_pipeline():
     @task(multiple_outputs=True)
     def prepare_context(**context):
         params = context.get('params', {}) or {}
-        target_date = params.get('target_date') or context['logical_date'].subtract(days=1).to_date_string()
+        target_date = params.get('target_date') or context['logical_date'].to_date_string()
 
         aws_conn = BaseHook.get_connection(MINIO_CONN_ID)
         aws_info = {
@@ -44,10 +44,11 @@ def news_analysis_daily_finalize_pipeline():
         return {
             "target_date": target_date,
             "aws": aws_info,
+            "target_bucket": TARGET_BUCKET,
         }
 
     @task.external_python(python=PYTHON_VENV_PATH, task_id='collect_incremental_paths')
-    def collect_incremental_paths(target_date, aws_info):
+    def collect_incremental_paths(target_date, aws_info, target_bucket):
         import boto3
 
         target_nodash = target_date.replace('-', '')
@@ -69,7 +70,7 @@ def news_analysis_daily_finalize_pipeline():
         for name, prefix in prefixes.items():
             paginator = s3.get_paginator('list_objects_v2')
             keys = []
-            for page in paginator.paginate(Bucket=TARGET_BUCKET, Prefix=prefix):
+            for page in paginator.paginate(Bucket=target_bucket, Prefix=prefix):
                 for obj in page.get('Contents', []):
                     key = obj['Key']
                     if f"window_start={target_nodash}" in key and key.endswith('/data.parquet'):
@@ -80,7 +81,7 @@ def news_analysis_daily_finalize_pipeline():
         return results
 
     @task.external_python(python=PYTHON_VENV_PATH, task_id='merge_refined_daily')
-    def merge_refined_daily(target_date, aws_info, collected_paths):
+    def merge_refined_daily(target_date, aws_info, collected_paths, target_bucket):
         import io
         import boto3
         import pandas as pd
@@ -101,19 +102,19 @@ def news_analysis_daily_finalize_pipeline():
 
         frames = []
         for key in refined_keys:
-            obj = s3.get_object(Bucket=TARGET_BUCKET, Key=key)
+            obj = s3.get_object(Bucket=target_bucket, Key=key)
             frames.append(pd.read_parquet(io.BytesIO(obj['Body'].read())))
 
         merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['news_id'], keep='last')
 
         out_buf = io.BytesIO()
         merged.to_parquet(out_buf, index=False)
-        s3.put_object(Bucket=TARGET_BUCKET, Key=output_key, Body=out_buf.getvalue())
+        s3.put_object(Bucket=target_bucket, Key=output_key, Body=out_buf.getvalue())
         print(f"✅ Saved daily refined: {output_key} ({len(merged)} rows)")
         return output_key
 
     @task.external_python(python=PYTHON_VENV_PATH, task_id='merge_analysis_daily')
-    def merge_analysis_daily(target_date, aws_info, collected_paths):
+    def merge_analysis_daily(target_date, aws_info, collected_paths, target_bucket):
         import io
         import boto3
         import pandas as pd
@@ -150,13 +151,13 @@ def news_analysis_daily_finalize_pipeline():
 
             frames = []
             for key in keys:
-                obj = s3.get_object(Bucket=TARGET_BUCKET, Key=key)
+                obj = s3.get_object(Bucket=target_bucket, Key=key)
                 frames.append(pd.read_parquet(io.BytesIO(obj['Body'].read())))
 
             merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=plan['dedupe'], keep='last')
             out_buf = io.BytesIO()
             merged.to_parquet(out_buf, index=False)
-            s3.put_object(Bucket=TARGET_BUCKET, Key=plan['output'], Body=out_buf.getvalue())
+            s3.put_object(Bucket=target_bucket, Key=plan['output'], Body=out_buf.getvalue())
             outputs[name] = plan['output']
             print(f"✅ Saved daily {name}: {plan['output']} ({len(merged)} rows)")
 
@@ -186,9 +187,9 @@ def news_analysis_daily_finalize_pipeline():
         return report
 
     ctx = prepare_context()
-    collected = collect_incremental_paths(ctx["target_date"], ctx["aws"])
-    refined = merge_refined_daily(ctx["target_date"], ctx["aws"], collected)
-    merged = merge_analysis_daily(ctx["target_date"], ctx["aws"], collected)
+    collected = collect_incremental_paths(ctx["target_date"], ctx["aws"], ctx["target_bucket"])
+    refined = merge_refined_daily(ctx["target_date"], ctx["aws"], collected, ctx["target_bucket"])
+    merged = merge_analysis_daily(ctx["target_date"], ctx["aws"], collected, ctx["target_bucket"])
     snapshot = build_keyword_snapshot(ctx["target_date"], ctx["aws"])
     report = finalize_report(ctx["target_date"], refined, merged, snapshot)
 
