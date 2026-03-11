@@ -79,7 +79,7 @@
 | Path A1 | 온보딩 기반 추천 | 가입 시 선택한 관심사(키워드/종목) 집합을 query로 사용하고, 평균 대신 Late Interaction(Max-Sim)으로 매칭 | RDBMS |
 | Path A2 | 로그 기반 추천 | 최근 20개 클릭/유효 읽기 로그의 키워드/종목에 대해 시간 감쇠와 Late Interaction(Max-Sim)을 적용 | RDBMS |
 | Path B | 최신 속보 | 짧은 시간창의 속보 기사 우선 추출 | RDBMS |
-| Path C | 인기 탐색 | Airflow가 약 `10분`마다 갱신하는 뉴스 집계 테이블과 popularity snapshot을 읽어 후보를 구성한다 | Aggregate Table + Snapshot Table |
+| Path C | 인기 탐색 | Airflow hourly DAG가 집계 테이블 갱신 직후 생성한 snapshot row의 `news_ids[]`를 읽어 후보를 구성한다 | Aggregate Table + Snapshot Table |
 
 - `Path C`는 기존 멀티 패스 구조의 정식 경로로 유지한다.
 - `Path C`의 후보 계산 책임은 FastAPI가 아니라 Airflow 배치에 둔다.
@@ -145,7 +145,7 @@
   - snapshot 계산 전에 `news_id` 기준 집계 테이블을 먼저 갱신한다.
   - 집계 테이블은 CTR 자체보다 CTR 계산 재료가 되는 count를 저장한다.
 - 계산 책임 분리
-  - Airflow는 약 `10분`마다 뉴스 집계 테이블과 popularity snapshot을 계산하고 저장한다.
+  - Airflow는 `recommendation_news_path_metrics_hourly` DAG에서 hourly 집계 직후 popularity snapshot을 계산하고 저장한다.
   - FastAPI는 집계 결과와 snapshot을 read-only로 조회하고, exclude/served filter와 path mixing만 담당한다.
 - 추천 이유
   - 인기 점수 계산을 요청 latency에서 분리한다.
@@ -169,23 +169,16 @@
     - `c_click_count`
   - 필요 시 `valid_dwell_count`, `window_start`, `window_end`, `last_event_at` 같은 필드를 확장할 수 있다.
 - 산출물 계약
-  - snapshot 저장소는 최소한 아래 필드를 가져야 한다.
-    - `snapshot_at`
-    - `news_id`
-    - `score`
-    - `rank`
-    - `domain`
-    - `category`
-  - 필요 시 `window_start`, `window_end`, `aggregate_snapshot_at`, `ctr_proxy` 같은 디버깅 필드를 추가할 수 있다.
+  - 현재 snapshot 저장소는 `recommendation_path_c_snapshot(snapshot_at, news_ids, created_at)` 형태다.
+  - 배열 순서 자체가 rank 역할을 하므로 API는 score를 재계산하지 않는다.
 - 점수 원칙
   - popularity는 집계 테이블의 count를 바탕으로 계산한다.
-  - 초기 점수는 raw count, smoothed CTR, recency를 조합하는 방식으로 정의할 수 있다.
-  - Bayesian smoothing 같은 보정은 count가 저장돼 있어야 쉽게 적용할 수 있다.
+  - 현재 구현은 최근 `72시간` `A1/A2/B` 합산 지표를 사용해 `TOTAL excluding C` 성격으로 계산한다.
+  - 점수는 베이지안 스무딩 CTR을 기본으로 사용하고, API는 정렬된 결과만 소비한다.
   - 특정 도메인 또는 카테고리 과집중을 막기 위한 cap 또는 penalty를 snapshot 계산 단계에서 적용한다.
   - API에서는 snapshot 점수를 재계산하지 않는다.
 - 장애 대응
-  - 최신 snapshot이 없으면 직전 snapshot을 읽을 수 있어야 한다.
-  - snapshot 조회까지 실패하면 `Path C`는 비활성화하고 `B` 또는 latest fallback으로 degrade 한다.
+  - 최신 snapshot이 stale하거나 비어 있으면 `Path C`는 비활성화하고 `B` 또는 latest fallback으로 degrade 한다.
 
 ### 3.3 Stage 3. Mixing And Exploration
 
@@ -348,10 +341,10 @@
 
 - prefetch 임계치를 남은 몇 개 기준으로 둘지
 - 추천 서버가 조회할 사용자 신호 source를 실시간 조회로 둘지, 일부 사전 집계 테이블로 둘지
-- `Path C` snapshot을 `10분` 고정 cadence로 둘지, 운영 후 `5분` 또는 `30분`으로 조정할지
+- `Path C` snapshot cadence를 현재 `1시간`에서 더 줄일지
 - 집계 테이블을 wide table(`news_id` + path별 count 컬럼)로 둘지, long table(`news_id`, `path`, `count`)로 둘지
 - `C`의 popularity 정의에 raw count, smoothed CTR, recency를 어떻게 섞을지
-- snapshot 저장소를 별도 테이블로 둘지, materialized view 또는 key-value cache로 둘지
+- `recommendation_path_c_snapshot`를 유지할지, 다른 저장소로 바꿀지
 - `keyword-keyword`, `stock-stock`, `keyword-stock` pair type별 similarity calibration을 어떤 방식으로 둘지
 - Max-Sim 연산에서 `keyword vector score`와 `entity hard match score`의 가중치 비율을 어떻게 둘지
 - 최신성 decay 함수를 `exp`, `half-life`, 구간 감쇠 중 어떤 형태로 둘지

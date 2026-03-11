@@ -6,7 +6,7 @@
 - 이 문서는 추천 API에서 "무엇을 구현해야 하는가"를 단계별 체크리스트로 정리한 실행 문서다.
 - 상위 목표와 아키텍처 배경은 [recommendation_api_design_draft.md](/home/dobi/Crawling/docs/recommendation_api_design_draft.md)를 기준으로 본다.
 - 현재 구현 단계는 `LLM Ranker`를 제거하고, `A1(온보딩) / A2(로그) / B(속보) / C(인기 탐색)` 구조를 기준으로 재정렬하는 것이다.
-- 이 문서 기준 `Path C`는 FastAPI 내부 실시간 계산이 아니라, Airflow가 약 `10분`마다 생성하는 snapshot을 읽는 방식으로 정리한다.
+- `Path C`는 `recommendation_news_path_metrics_hourly` DAG 뒤에서 생성한 snapshot을 읽는 방식으로 다시 연결되어 있다.
 - 이 저장소의 추천 API 검증 기준은 기본적으로 `Docker compose` 환경이다.
 - 로컬 셸에 `pytest`, `psycopg2` 같은 패키지가 없더라도, `recommend-api` 컨테이너가 떠 있으면 먼저 컨테이너 내부에서 검증한다.
 - 따라서 검증 가능 여부를 판단할 때는 "호스트 로컬 Python 환경"보다 "`docker compose exec recommend-api ...` 실행 가능 여부"를 우선 확인한다.
@@ -21,7 +21,7 @@
 - 추천 계산에 필요한 사용자 신호는 외부 `context`보다 `user_id` 기준 내부 조회를 기본으로 하도록 정리 중이다.
 - 현재 구현 기준 기본 동작은 `A1(온보딩) + A2(로그) + B(속보) + C(인기 탐색)` 멀티 패스 믹싱이다.
 - `로그 기반 후보(A2)`는 최근 행동 로그 조회, 엔터티 복원, decay, Max-Sim scoring까지 반영돼 있다.
-- `인기 탐색 후보(C)`는 앞으로 Airflow snapshot 기반 read-only path로 전환한다.
+- `인기 탐색 후보(C)`는 최신 snapshot row의 `news_ids[]`를 읽는 read-only path로 연결돼 있다.
 - 추천 응답 시 impression 로그를 자동 적재하고, `POST /recommend/news/click`로 click 로그를 path와 함께 적재한다.
 
 ### 현재 계약
@@ -45,7 +45,7 @@
 
 ## 2. Phase 1A Checklist
 
-1A 단계 목표는 "`user_id` 기반 내부 신호 조회를 전제로 `A1(온보딩)`과 `B(속보)`를 먼저 안정화하고, `C(인기 탐색)`는 snapshot read 경로까지 포함한 멀티 패스 서빙 뼈대"를 올리는 것이다.
+1A 단계 목표는 "`user_id` 기반 내부 신호 조회를 전제로 `A1(온보딩)`, `B(속보)`, `C(인기 탐색)`를 안정화하는 것"이다.
 
 ### 2.1 Progress Snapshot
 
@@ -61,11 +61,10 @@
   - impression 자동 로그와 click 로그 적재 경로가 코드와 테스트에 반영돼 있다.
   - Docker 기준 추천 API 테스트, 앱 레벨 HTTP 확인, Redis-backed session cache 구성을 확인했다.
   - stale session은 기존 `served_ids`를 유지한 채 unseen 후보만 재생성하는 restore 정책으로 고정됐다.
-  - 첫 page window에서 `breaking/popular`가 완전히 사라지지 않도록 mix guardrail을 둘 방향이 정리돼 있다.
+  - 첫 page window에서 `breaking`이 완전히 사라지지 않도록 mix guardrail을 둔다.
 - 부분 완료
   - 로그 필드는 남아 있지만, `impression/click -> recent_actions` 데이터 루프는 아직 닫히지 않았다.
   - 요청 계약은 아직 `context` optional 형태를 유지하지만, 기본 경로는 `user_id(integer)` 기반 내부 조회이고 `context`는 debug override 용도로만 쓰인다.
-  - `Path C`는 문서상 snapshot 방식으로 전환 방향이 확정됐지만, API와 배치 구현은 아직 같이 맞춰야 한다.
 - 미완료
   - 1A 완료 기준 전부를 만족하는 end-to-end 검증은 아직 아니다.
 
@@ -127,19 +126,15 @@
 ### 2.7 Path C. Popular Exploration Skeleton
 
 - [x] Path C를 정식 경로로 문서에 유지
-- [x] `Path C`를 Airflow snapshot 기반 path로 재정의
-- [x] snapshot 계산 주기를 약 `10분`으로 두는 방향 확정
-- [x] snapshot 이전에 `news_id` 기준 집계 테이블을 먼저 갱신하는 방향 확정
-- [x] 집계 테이블 최소 필드(total/path별 impression/click count) 정의
-- [x] snapshot 최소 필드(`snapshot_at`, `news_id`, `score`, `rank`, `domain`, `category`) 정의
-- [x] recency와 category/domain diversity를 snapshot 계산 단계에서 반영하는 방향 확정
-- [x] 세션 캐시에 popular queue를 저장할지 구조 확정
-- [ ] 집계 테이블 스키마 확정
-- [ ] snapshot 저장 테이블 또는 동등 저장소 스키마 확정
-- [ ] Airflow DAG가 집계 테이블을 주기적으로 갱신하도록 구현
-- [ ] Airflow DAG가 `Path C` snapshot을 주기적으로 갱신하도록 구현
-- [ ] API repository가 최신 snapshot을 read-only 조회하도록 전환
-- [ ] snapshot 부재 시 이전 snapshot 사용 규칙 확정
+- [x] snapshot source를 `recommendation_news_path_metrics` 기반으로 확정
+- [x] `recommendation_news_path_metrics_hourly` DAG 뒤에서 snapshot 생성 task를 실행하도록 연결
+- [x] snapshot 저장소를 `recommendation_path_c_snapshot(snapshot_at, news_ids[])` 테이블로 확정
+- [x] snapshot 계산에서 최근 `72시간` 롤링 window를 사용하도록 구현
+- [x] `TOTAL excluding C` 성격으로 `A1/A2/B` 합산 지표를 읽도록 구현
+- [x] Bayesian smoothing CTR 기반 점수 계산을 구현
+- [x] API repository가 latest snapshot을 read-only 조회하도록 전환
+- [x] API가 snapshot 배열 순서를 rank로 사용하도록 연결
+- [x] snapshot stale 시 `Path C`를 비활성화하도록 구현
 
 ### 2.8 Session Cache And Pagination
 
@@ -149,8 +144,7 @@
 - [x] batch rollover 시 prefetched queue를 이어 붙임
 - [x] 필요 시 세션 재생성 fallback 지원
 - [x] stale session 복원 정책은 기존 served prefix 유지 + unseen tail 재생성으로 고정
-- [x] Path C 활성화 시 popular queue 저장 구조 확장
-- [ ] popular queue가 snapshot 버전 또는 `snapshot_at`과 함께 저장되도록 계약 확정
+- [x] popular queue를 세션 캐시에 포함
 
 ### 2.9 Mixing Baseline
 
@@ -158,8 +152,8 @@
 - [x] path별 큐를 따로 보관하고 최종 timeline은 mix 결과로 생성
 - [x] 중복 뉴스 제거 규칙 유지
 - [x] MAB 없이도 동작하는 기본 서빙 경로 확보
-- [x] 1A 기준 운영 guardrail 문구는 `first page window` 내 `breaking/popular` 최소 노출 규칙으로 구체화
-- [ ] snapshot이 stale한 경우 `popular` 비중 축소 또는 비활성화 규칙 확정
+- [x] 1A 기준 운영 guardrail 문구는 `first page window` 내 `breaking` 최소 노출 규칙으로 구체화
+- [x] `Path C`를 mix path로 다시 활성화
 
 ### 2.10 Logging And Observability
 
@@ -169,9 +163,6 @@
 - [x] `context_hash`, `context_present` 로그 적재
 - [x] impression/click 로그 실제 적재 경로 검증 필요
 - [x] `cold/warm` 분리 집계 기준은 request log의 `user_state` 필드로 적재
-- [x] Path C impression/click 집계 필드 정의
-- [ ] Airflow 집계 테이블에 total/path별 impression/click count 적재 구현
-- [ ] request log에 `popular_snapshot_at` 또는 `popular_snapshot_version` 적재 여부 확정
 
 ### 2.11 Validation Status
 
@@ -255,23 +246,19 @@
 
 ### 4.3 Popular Exploration Path C
 
-- [x] Path C를 API 실시간 계산이 아니라 Airflow snapshot read path로 확정
-- [x] snapshot 입력으로 `news_id` 기준 집계 테이블을 사용한다는 원칙 확정
-- [ ] 집계 테이블 이름과 컬럼 정의 확정
-- [ ] total/path별 impression/click count 집계 SQL 또는 모듈 구현
-- [ ] Bayesian smoothing 또는 동등 보정 공식을 snapshot 계산에서 사용할지 결정
-- [ ] snapshot source table 또는 materialized view 이름 확정
-- [ ] snapshot 계산 SQL 또는 모듈 구현
-- [ ] snapshot refresh cadence를 `10분`으로 구현
-- [ ] snapshot에 raw count, smoothed CTR, recency 조합 방식 반영
-- [ ] category/domain 편중 방지 규칙을 snapshot 계산 단계에 반영
-- [ ] API에서 latest snapshot read + exclude filter만 수행하도록 전환
+- [x] total/path별 impression/click count 집계 SQL 구현
+- [x] Bayesian smoothing CTR 기반 snapshot 계산 구현
+- [x] snapshot source table을 `recommendation_news_path_metrics`로 확정
+- [x] snapshot 저장소를 `recommendation_path_c_snapshot` 일반 테이블로 확정
+- [x] snapshot 계산 SQL 구현
+- [x] snapshot refresh cadence를 `recommendation_news_path_metrics_hourly` DAG 주기와 동일한 `1시간`으로 구현
+- [x] API에서 latest snapshot read + exclude filter만 수행하도록 전환
 - [ ] `A1/A2/B/C` mix에서 C의 최소/최대 guardrail 확정
 - [ ] snapshot 공백 또는 stale 시 fallback 규칙 구현
 
 ## 5. Fallback Matrix
 
-아래 표는 목표 동작 기준이다. `Path C`는 snapshot 기반 path를 전제로 하며, 실패 시 `B+C` 또는 latest fallback으로 degrade 한다.
+아래 표는 현재 구현 + 목표 동작 기준이다. `Path C`는 snapshot 기반 path를 전제로 하며, 실패 시 `B` 또는 latest fallback으로 degrade 한다.
 
 | 상황 | 기본 대응 |
 | --- | --- |
@@ -338,8 +325,7 @@
 - prefetch 트리거를 primary queue 합산 기준으로만 둘지, path별로 세분화할지
 - `user_id` 기반 사용자 신호 조회를 실시간 조회로 둘지, 일부 사전 집계 테이블로 둘지
 - 집계 테이블을 wide table(`news_id` + total/path별 count 컬럼)로 둘지, long table(`news_id`, `path`, `metric`)로 둘지
-- Path C snapshot 저장소를 일반 테이블, materialized view, key-value cache 중 무엇으로 둘지
-- Path C snapshot cadence를 `10분` 고정으로 둘지, 운영 후 `5분` 또는 `30분`으로 조정할지
+- Path C snapshot cadence를 현재 `1시간`에서 더 줄일지
 - `Path C` snapshot에서 raw count, smoothed CTR, recency를 어떤 비율로 섞을지
 - pair type별 similarity calibration을 normalization으로 할지, 별도 weight matrix로 할지
 - Max-Sim 점수와 entity hard match 점수 비율을 얼마로 둘지
@@ -367,7 +353,6 @@
   - A2 최근 행동 로그 source
   - vector lookup source
   - recommendation aggregate source
-  - C popularity snapshot source
 
 #### A1 Onboarding Source
 
@@ -434,7 +419,7 @@
   - `event_ts_client` 또는 `event_ts_server`
   - `source_path`
 - `source_path`는 `A1`, `A2`, `B`, `C` attribution을 위해 필요하다.
-- 저장소명은 미정이지만, Airflow가 약 `10분`마다 `news_id` 기준 aggregate table을 갱신하는 것을 원칙으로 한다.
+- 현재 `recommendation_news_path_metrics_hourly` DAG가 `1시간`마다 `news_id + path` 기준 aggregate table을 갱신한다.
 - 최소 필드
   - `news_id`
   - `snapshot_at`
@@ -454,12 +439,9 @@
 
 #### Path C Snapshot Source
 
-- 저장소명은 미정이지만, `Path C`는 Airflow가 약 `10분`마다 갱신하는 snapshot 저장소를 읽는 것을 원칙으로 한다.
-- 최소 필드
-  - `snapshot_at`
-  - `news_id`
-  - `score`
-  - `rank`
+- 현재 저장소는 `recommendation_path_c_snapshot(snapshot_at, news_ids, created_at)`다.
+- `recommendation_news_path_metrics_hourly` DAG에서 hourly aggregate 직후 snapshot row를 갱신한다.
+- API는 최신 `snapshot_at` row 1개만 읽고, `news_ids[]` 배열 순서를 rank로 사용한다.
   - `domain`
   - `category`
 - 계산 입력 source는 `Recommendation Aggregate Source`, `naver_news`, `filtered_news` 등을 기준으로 한다.
