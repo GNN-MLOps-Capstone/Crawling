@@ -510,10 +510,7 @@ class RecommendService:
 
         guarded = timeline_entries[:]
         window_size = min(settings.guardrail_first_page_window, len(guarded))
-        requirements = (
-            ("breaking", settings.guardrail_min_breaking_in_window),
-            ("popular", settings.guardrail_min_popular_in_window),
-        )
+        requirements = (("breaking", settings.guardrail_min_breaking_in_window),)
         required_paths = {required_path for required_path, min_count in requirements if min_count > 0}
         for required_path, min_count in requirements:
             if min_count <= 0:

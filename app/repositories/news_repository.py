@@ -26,52 +26,53 @@ class NewsRepository:
         self,
         *,
         limit: int,
-        hours: int,
         exclude_ids: set[int],
         blocked_domains: tuple[str, ...] = (),
     ) -> list[NewsCandidate]:
         query = """
             WITH latest_snapshot AS (
-                SELECT MAX(snapshot_at) AS snapshot_at
-                FROM recommendation_popular_snapshot
+                SELECT snapshot_at, news_ids
+                FROM public.recommendation_path_c_snapshot
+                ORDER BY snapshot_at DESC
+                LIMIT 1
+            ),
+            ranked_ids AS (
+                SELECT
+                    ls.snapshot_at,
+                    item.news_id,
+                    item.rank
+                FROM latest_snapshot ls
+                CROSS JOIN LATERAL unnest(ls.news_ids) WITH ORDINALITY AS item(news_id, rank)
             )
             SELECT
-                rps.snapshot_at,
+                ri.snapshot_at,
                 nn.news_id,
                 nn.title,
                 nn.pub_date,
                 nn.url,
-                COALESCE(rps.category, 'unknown') AS category,
-                COALESCE(rps.domain, 'unknown') AS domain,
-                rps.score
-            FROM recommendation_popular_snapshot rps
-            JOIN latest_snapshot ls
-              ON ls.snapshot_at = rps.snapshot_at
-            JOIN filtered_news fn
-              ON fn.news_id = rps.news_id
-            JOIN naver_news nn
-              ON nn.news_id = rps.news_id
-            WHERE nn.pub_date >= %s
-            ORDER BY rps.rank ASC, rps.score DESC, rps.news_id DESC
-            LIMIT %s
+                ri.rank
+            FROM ranked_ids ri
+            JOIN filtered_news fn ON fn.news_id = ri.news_id
+            JOIN naver_news nn ON nn.news_id = ri.news_id
+            ORDER BY ri.rank ASC
         """
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (datetime.now(UTC) - timedelta(hours=hours), limit * 3))
+                cur.execute(query)
                 rows = cur.fetchall()
 
         candidates: list[NewsCandidate] = []
         latest_snapshot_at: datetime | None = None
-        for snapshot_at, news_id, title, pub_date, url, category, domain, score in rows:
+        for snapshot_at, news_id, title, pub_date, url, rank in rows:
             if latest_snapshot_at is None:
                 latest_snapshot_at = snapshot_at
             normalized_news_id = int(news_id)
             if normalized_news_id in exclude_ids:
                 continue
             normalized_url = str(url or "")
-            normalized_domain = str(domain or "").strip() or urlparse(normalized_url).netloc.replace("www.", "") or "unknown"
-            if normalized_domain in blocked_domains:
+            normalized_domain = urlparse(normalized_url).netloc.replace("www.", "") if normalized_url else "unknown"
+            if normalized_domain and normalized_domain in blocked_domains:
                 continue
             candidates.append(
                 NewsCandidate(
@@ -79,9 +80,9 @@ class NewsRepository:
                     title=str(title or ""),
                     pub_date=pub_date,
                     url=normalized_url,
-                    category=str(category or "unknown"),
-                    domain=normalized_domain,
-                    score=float(score) if score is not None else None,
+                    category="unknown",
+                    domain=normalized_domain or "unknown",
+                    score=None,
                     snapshot_at=snapshot_at,
                 )
             )

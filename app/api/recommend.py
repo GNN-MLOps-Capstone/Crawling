@@ -40,7 +40,6 @@ def get_recommend_service() -> RecommendService:
             onboarding_limit=settings.onboarding_candidate_limit,
             behavior_limit=settings.behavior_candidate_limit,
             breaking_limit=settings.breaking_candidate_limit,
-            popular_hours=settings.popular_hours,
             popular_limit=settings.popular_candidate_limit,
             blocked_domains=settings.blocked_domains,
         ),

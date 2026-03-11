@@ -52,11 +52,9 @@ class Settings:
     breaking_stale_cutoff_minutes: int = int(
         os.getenv("RECO_BREAKING_STALE_CUTOFF_MINUTES", os.getenv("RECO_PATH_B_STALE_CUTOFF_MINUTES", "120"))
     )
-    popular_hours: int = int(os.getenv("RECO_POPULAR_HOURS", "72"))
-    popular_snapshot_max_age_minutes: int = int(os.getenv("RECO_POPULAR_SNAPSHOT_MAX_AGE_MINUTES", "30"))
+    popular_snapshot_max_age_minutes: int = int(os.getenv("RECO_POPULAR_SNAPSHOT_MAX_AGE_MINUTES", "180"))
     guardrail_first_page_window: int = int(os.getenv("RECO_GUARDRAIL_FIRST_PAGE_WINDOW", "10"))
     guardrail_min_breaking_in_window: int = int(os.getenv("RECO_GUARDRAIL_MIN_BREAKING_IN_WINDOW", "1"))
-    guardrail_min_popular_in_window: int = int(os.getenv("RECO_GUARDRAIL_MIN_POPULAR_IN_WINDOW", "1"))
     blocked_domains: tuple[str, ...] = tuple(
         domain.strip()
         for domain in os.getenv("RECO_BLOCKED_DOMAINS", "").split(",")

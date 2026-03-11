@@ -106,19 +106,12 @@ class FakeNewsRepository:
         self,
         *,
         limit: int,
-        hours: int,
         exclude_ids: set[int],
         blocked_domains: tuple[str, ...] = (),
     ) -> list[NewsCandidate]:
-        del hours, blocked_domains
-        if self.popular_candidates:
-            return [
-                candidate
-                for candidate in self.popular_candidates
-                if candidate.news_id not in exclude_ids
-            ][:limit]
-        return []
-
+        del blocked_domains
+        candidates = [candidate for candidate in self.popular_candidates if candidate.news_id not in exclude_ids]
+        return candidates[:limit]
 
 class PathBOnlyRepository(FakeNewsRepository):
     def fetch_recent_candidates(
@@ -162,7 +155,6 @@ def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
             onboarding_limit=50,
             behavior_limit=50,
             breaking_limit=30,
-            popular_hours=24,
             popular_limit=30,
         ),
     )
@@ -422,7 +414,6 @@ def test_behavior_personalized_scoring_uses_recent_action_entities() -> None:
         onboarding_limit=50,
         behavior_limit=50,
         breaking_limit=30,
-        popular_hours=24,
         popular_limit=30,
     )
     context = RecommendContextBuilder().build(
@@ -473,7 +464,6 @@ def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
         onboarding_limit=2,
         behavior_limit=2,
         breaking_limit=1,
-        popular_hours=24,
         popular_limit=2,
     )
     context = RecommendContextBuilder().build(
@@ -530,7 +520,6 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
             onboarding_limit=50,
             behavior_limit=50,
             breaking_limit=30,
-            popular_hours=24,
             popular_limit=30,
         ),
     )
@@ -573,7 +562,6 @@ def test_stale_session_is_restored_for_cursor_pagination() -> None:
             onboarding_limit=10,
             behavior_limit=10,
             breaking_limit=5,
-            popular_hours=24,
             popular_limit=5,
         ),
     )
@@ -596,7 +584,7 @@ def test_stale_session_is_restored_for_cursor_pagination() -> None:
     assert second.meta.fallback_reason == "stale_session_restored"
 
 
-def test_mix_guardrail_promotes_breaking_and_popular_into_first_window() -> None:
+def test_mix_guardrail_promotes_breaking_into_first_window() -> None:
     entries = [
         (101, "onboarding"),
         (102, "onboarding"),
@@ -609,14 +597,56 @@ def test_mix_guardrail_promotes_breaking_and_popular_into_first_window() -> None
         (109, "onboarding"),
         (110, "behavior"),
         (201, "breaking"),
-        (301, "popular"),
     ]
 
     guarded = RecommendService._apply_mix_guardrails(entries)
     first_window_paths = [path for _, path in guarded[: recommend_service_module.settings.guardrail_first_page_window]]
 
     assert "breaking" in first_window_paths
-    assert "popular" in first_window_paths
+
+
+def test_popular_candidates_are_served_as_path_c() -> None:
+    repository = FakeNewsRepository([21, 20, 19, 18])
+    repository.popular_candidates = [
+        NewsCandidate(
+            news_id=501,
+            title="popular-501",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://example.com/501",
+            category="unknown",
+            domain="example.com",
+        ),
+        NewsCandidate(
+            news_id=500,
+            title="popular-500",
+            pub_date=datetime.now(UTC).replace(tzinfo=None),
+            url="https://example.com/500",
+            category="unknown",
+            domain="example.com",
+        ),
+    ]
+    service = RecommendService(
+        repository=repository,
+        session_cache=InMemorySessionCache(),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=0,
+            behavior_limit=0,
+            breaking_limit=0,
+            popular_limit=2,
+        ),
+    )
+
+    response = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, context={}))
+
+    assert [item.news_id for item in response.items] == [501, 500]
+    assert [item.path for item in response.items] == ["C", "C"]
 
 
 def test_recommendation_response_emits_impression_logs(monkeypatch) -> None:
@@ -659,72 +689,3 @@ def test_click_endpoint_logs_path_from_served_session(monkeypatch) -> None:
     assert captured[0].news_id == body["items"][0]["news_id"]
     assert captured[0].rank == 1
     assert captured[0].path == "onboarding"
-
-
-def test_popular_path_uses_snapshot_order() -> None:
-    repository = FakeNewsRepository([500, 499, 498, 497])
-    repository.popular_candidates = [
-        NewsCandidate(
-            news_id=500,
-            title="popular-500",
-            pub_date=datetime.now(UTC).replace(tzinfo=None),
-            url="https://alpha.com/500",
-            category="alpha.com",
-            domain="alpha.com",
-            score=10.0,
-        ),
-        NewsCandidate(
-            news_id=499,
-            title="popular-499",
-            pub_date=datetime.now(UTC).replace(tzinfo=None),
-            url="https://alpha.com/499",
-            category="alpha.com",
-            domain="alpha.com",
-            score=9.0,
-        ),
-        NewsCandidate(
-            news_id=498,
-            title="popular-498",
-            pub_date=datetime.now(UTC).replace(tzinfo=None),
-            url="https://alpha.com/498",
-            category="alpha.com",
-            domain="alpha.com",
-            score=8.0,
-        ),
-        NewsCandidate(
-            news_id=497,
-            title="popular-497",
-            pub_date=datetime.now(UTC).replace(tzinfo=None),
-            url="https://beta.com/497",
-            category="beta.com",
-            domain="beta.com",
-            score=7.0,
-        ),
-    ]
-    retrieval_service = RetrievalService(
-        repository=repository,
-        base_pool_hours=72,
-        onboarding_hours=72,
-        behavior_hours=72,
-        breaking_hours=2,
-        breaking_stale_cutoff_minutes=120,
-        onboarding_limit=0,
-        behavior_limit=0,
-        breaking_limit=0,
-        popular_hours=24,
-        popular_limit=3,
-    )
-    context = RecommendContextBuilder().build(
-        user_id=1,
-        raw_context={},
-        repository=repository,
-    )
-
-    retrieval = retrieval_service.retrieve(context=context, exclude_ids=set())
-
-    assert [item.news_id for item in retrieval.popular] == [499, 498, 497]
-
-
-def test_stale_popular_snapshot_is_treated_as_unavailable() -> None:
-    assert NewsRepository._is_stale_popular_snapshot(datetime.now(UTC) - timedelta(minutes=31)) is True
-    assert NewsRepository._is_stale_popular_snapshot(datetime.now(UTC) - timedelta(minutes=5)) is False

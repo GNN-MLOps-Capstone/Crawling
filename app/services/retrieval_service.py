@@ -41,7 +41,6 @@ class RetrievalService:
     onboarding_limit: int
     behavior_limit: int
     breaking_limit: int
-    popular_hours: int
     popular_limit: int
     blocked_domains: tuple[str, ...] = ()
 
@@ -121,7 +120,6 @@ class RetrievalService:
         try:
             popular = self.repository.fetch_popular_candidates(
                 limit=self.popular_limit,
-                hours=self.popular_hours,
                 exclude_ids=exclude_ids
                 | {item.news_id for item in onboarding}
                 | {item.news_id for item in behavior}
