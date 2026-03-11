@@ -24,7 +24,7 @@ class Settings:
     base_pool_hours: int = int(os.getenv("RECO_BASE_POOL_HOURS", "72"))
     onboarding_hours: int = int(os.getenv("RECO_ONBOARDING_HOURS", os.getenv("RECO_PATH_A_HOURS", "72")))
     behavior_hours: int = int(os.getenv("RECO_BEHAVIOR_HOURS", "72"))
-    breaking_hours: int = int(os.getenv("RECO_BREAKING_HOURS", os.getenv("RECO_PATH_B_HOURS", "2")))
+    breaking_hours: int = int(os.getenv("RECO_BREAKING_HOURS", os.getenv("RECO_PATH_B_HOURS", "24")))
     onboarding_candidate_limit: int = int(os.getenv("RECO_ONBOARDING_LIMIT", os.getenv("RECO_PATH_A_LIMIT", "50")))
     behavior_candidate_limit: int = int(os.getenv("RECO_BEHAVIOR_LIMIT", "50"))
     breaking_candidate_limit: int = int(os.getenv("RECO_BREAKING_LIMIT", os.getenv("RECO_PATH_B_LIMIT", "30")))

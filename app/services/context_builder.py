@@ -88,7 +88,7 @@ class RecommendContextBuilder:
                 "base_pool_hours": 72,
                 "onboarding_hours": 72,
                 "behavior_hours": 72,
-                "breaking_hours": 2,
+                "breaking_hours": 24,
             },
             signal_source=signal_source,
             lookup_errors=tuple(lookup_errors),
