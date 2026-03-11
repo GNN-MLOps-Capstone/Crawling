@@ -28,3 +28,11 @@ with DAG(
         conn_id="news_data_db",
         sql="sql/aggregate_recommendation_news_path_metrics_hourly.sql",
     )
+
+    build_path_c_snapshot = SQLExecuteQueryOperator(
+        task_id="build_recommendation_path_c_snapshot",
+        conn_id="news_data_db",
+        sql="sql/build_recommendation_path_c_snapshot.sql",
+    )
+
+    aggregate_hourly_metrics >> build_path_c_snapshot
