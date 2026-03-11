@@ -1,7 +1,8 @@
+{% set dag_conf = dag_run.conf if dag_run and dag_run.conf else {} %}
 WITH params AS (
     SELECT
-        '{{ data_interval_end.to_iso8601_string() }}'::timestamptz AS snapshot_at,
-        '{{ data_interval_end.to_iso8601_string() }}'::timestamptz - INTERVAL '72 hours' AS window_start,
+        '{{ dag_conf.get("window_end") or params.get("window_end") or data_interval_end.to_iso8601_string() }}'::timestamptz AS snapshot_at,
+        '{{ dag_conf.get("window_end") or params.get("window_end") or data_interval_end.to_iso8601_string() }}'::timestamptz - INTERVAL '72 hours' AS window_start,
         500::integer AS candidate_limit,
         20.0::double precision AS prior_impressions
 ),

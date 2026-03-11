@@ -4,6 +4,7 @@ import pendulum
 from datetime import timedelta
 
 from airflow.models.dag import DAG
+from airflow.models.param import Param
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
 
@@ -18,10 +19,14 @@ with DAG(
     dag_id="recommendation_news_path_metrics_hourly",
     default_args=default_args,
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
-    schedule="0 * * * *",
+    schedule=None,
     catchup=False,
     doc_md="추천 노출/클릭/체류시간 지표를 1시간 단위로 집계하는 DAG",
     tags=["recommendation", "aggregation", "hourly"],
+    params={
+        "window_start": Param(None, type=["null", "string"], description="UTC window start"),
+        "window_end": Param(None, type=["null", "string"], description="UTC window end"),
+    },
 ) as dag:
     aggregate_hourly_metrics = SQLExecuteQueryOperator(
         task_id="aggregate_recommendation_news_path_metrics_hourly",

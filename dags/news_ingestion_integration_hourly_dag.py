@@ -1,9 +1,11 @@
 import pendulum
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook
 from airflow.models.param import Param
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
@@ -268,6 +270,16 @@ def news_ingestion_integration_hourly_pipeline():
         print(f"[{stage}] {window_start} ~ {window_end} filter_status counts: {result}", flush=True)
         return result
 
+    @task(multiple_outputs=True)
+    def build_recommendation_metrics_conf(window_start, window_end):
+        kst = ZoneInfo("Asia/Seoul")
+        start_dt = datetime.strptime(window_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=kst)
+        end_dt = datetime.strptime(window_end, "%Y-%m-%d %H:%M:%S").replace(tzinfo=kst)
+        return {
+            "window_start": start_dt.astimezone(ZoneInfo("UTC")).isoformat(),
+            "window_end": end_dt.astimezone(ZoneInfo("UTC")).isoformat(),
+        }
+
     ctx = prepare_context()
     pg_info = prepare_db_context()
     stock_map = get_stock_mapping()
@@ -291,8 +303,18 @@ def news_ingestion_integration_hourly_pipeline():
     analyzed = gemini_incremental(ctx, refined, ctx["aws"], stock_map, pg_info, SILVER_BUCKET, CONFIG_PATH)
     loaded = load_incremental_to_db(ctx["window_label"], ctx["aws"], pg_info, analyzed)
     status_after = report_window_status(ctx["window_start"], ctx["window_end"], "after")
+    metrics_conf = build_recommendation_metrics_conf(ctx["window_start"], ctx["window_end"])
+    trigger_recommendation_metrics = TriggerDagRunOperator(
+        task_id="trigger_recommendation_news_path_metrics_hourly",
+        trigger_dag_id="recommendation_news_path_metrics_hourly",
+        conf={
+            "window_start": "{{ ti.xcom_pull(task_ids='build_recommendation_metrics_conf')['window_start'] }}",
+            "window_end": "{{ ti.xcom_pull(task_ids='build_recommendation_metrics_conf')['window_end'] }}",
+        },
+        wait_for_completion=False,
+    )
 
-    status_before >> bronze >> targets >> refined >> analyzed >> loaded >> status_after
+    status_before >> bronze >> targets >> refined >> analyzed >> loaded >> status_after >> metrics_conf >> trigger_recommendation_metrics
 
 
 dag_instance = news_ingestion_integration_hourly_pipeline()

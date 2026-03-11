@@ -1,7 +1,8 @@
+{% set dag_conf = dag_run.conf if dag_run and dag_run.conf else {} %}
 WITH params AS (
     SELECT
-        '{{ data_interval_start.to_iso8601_string() }}'::timestamptz AS window_start,
-        '{{ data_interval_end.to_iso8601_string() }}'::timestamptz AS snapshot_at,
+        '{{ dag_conf.get("window_start") or params.get("window_start") or data_interval_start.to_iso8601_string() }}'::timestamptz AS window_start,
+        '{{ dag_conf.get("window_end") or params.get("window_end") or data_interval_end.to_iso8601_string() }}'::timestamptz AS snapshot_at,
         20::integer AS per_user_limit,
         10::double precision AS dwell_threshold_seconds
 ),
