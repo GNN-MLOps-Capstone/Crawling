@@ -135,54 +135,40 @@ class NewsRepository:
         limit: int,
         dwell_threshold_seconds: int,
     ) -> list[dict[str, object]]:
+        del dwell_threshold_seconds
         query = """
-            WITH session_events AS (
-                SELECT
-                    news_id,
-                    content_session_id,
-                    MIN(CASE WHEN event_type = 'content_open' THEN event_ts_client END) AS view_ts,
-                    MAX(CASE WHEN event_type = 'content_leave' THEN event_ts_client END) AS leave_ts,
-                    MAX(event_ts_client) AS latest_event_ts
-                FROM interaction_events
-                WHERE user_id = %s::varchar
-                  AND event_type IN ('content_open', 'content_leave')
-                  AND news_id IS NOT NULL
-                GROUP BY news_id, content_session_id
-            ),
-            qualified_sessions AS (
-                SELECT
-                    news_id,
-                    COALESCE(leave_ts, latest_event_ts) AS action_ts,
-                    EXTRACT(EPOCH FROM (COALESCE(leave_ts, latest_event_ts) - view_ts)) AS dwell_seconds
-                FROM session_events
-                WHERE view_ts IS NOT NULL
-            )
             SELECT
-                qs.news_id,
-                qs.action_ts,
-                qs.dwell_seconds,
-                COALESCE(
-                    ARRAY_AGG(DISTINCT nk.keyword_id::varchar)
-                    FILTER (WHERE nk.keyword_id IS NOT NULL),
-                    '{}'
+                (item.value ->> 'news_id')::bigint AS news_id,
+                NULLIF(item.value ->> 'timestamp', '')::timestamptz AS action_ts,
+                NULLIF(item.value ->> 'dwell_seconds', '')::double precision AS dwell_seconds,
+                ARRAY(
+                    SELECT jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(item.value -> 'keyword_ids') = 'array' THEN item.value -> 'keyword_ids'
+                            ELSE '[]'::jsonb
+                        END
+                    )
                 ) AS keyword_ids,
-                COALESCE(
-                    ARRAY_AGG(DISTINCT ns.stock_id::varchar)
-                    FILTER (WHERE ns.stock_id IS NOT NULL),
-                    '{}'
+                ARRAY(
+                    SELECT jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(item.value -> 'stock_ids') = 'array' THEN item.value -> 'stock_ids'
+                            ELSE '[]'::jsonb
+                        END
+                    )
                 ) AS stock_ids
-            FROM qualified_sessions qs
-            LEFT JOIN news_keyword_mapping nk ON nk.news_id = qs.news_id
-            LEFT JOIN news_stock_mapping ns ON ns.news_id = qs.news_id
-            WHERE qs.dwell_seconds >= %s
-            GROUP BY qs.news_id, qs.action_ts, qs.dwell_seconds
-            ORDER BY qs.action_ts DESC, qs.news_id DESC
+            FROM public.recommendation_path_a2_snapshot snap
+            CROSS JOIN LATERAL jsonb_array_elements(snap.items) WITH ORDINALITY AS item(value, ordinality)
+            WHERE snap.user_id = %s
+              AND item.value ? 'news_id'
+              AND item.value ? 'timestamp'
+            ORDER BY item.ordinality ASC
             LIMIT %s
         """
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (user_id, dwell_threshold_seconds, limit))
+                cur.execute(query, (user_id, limit))
                 rows = cur.fetchall()
 
         actions: list[dict[str, object]] = []
