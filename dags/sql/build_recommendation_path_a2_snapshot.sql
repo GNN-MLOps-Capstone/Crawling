@@ -4,7 +4,7 @@ WITH params AS (
         '{{ dag_conf.get("window_start") or params.get("window_start") or data_interval_start.to_iso8601_string() }}'::timestamptz AS window_start,
         '{{ dag_conf.get("window_end") or params.get("window_end") or data_interval_end.to_iso8601_string() }}'::timestamptz AS snapshot_at,
         20::integer AS per_user_limit,
-        10::double precision AS dwell_threshold_seconds
+        5::double precision AS dwell_threshold_seconds
 ),
 changed_users AS (
     SELECT DISTINCT

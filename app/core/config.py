@@ -30,7 +30,7 @@ class Settings:
     breaking_candidate_limit: int = int(os.getenv("RECO_BREAKING_LIMIT", os.getenv("RECO_PATH_B_LIMIT", "30")))
     popular_candidate_limit: int = int(os.getenv("RECO_POPULAR_LIMIT", "30"))
     behavior_action_limit: int = int(os.getenv("RECO_BEHAVIOR_ACTION_LIMIT", "20"))
-    valid_read_dwell_seconds: int = int(os.getenv("RECO_VALID_READ_DWELL_SECONDS", "10"))
+    valid_read_dwell_seconds: int = int(os.getenv("RECO_VALID_READ_DWELL_SECONDS", "5"))
     retrieval_candidate_pool_multiplier: int = int(os.getenv("RECO_RETRIEVAL_CANDIDATE_POOL_MULTIPLIER", "4"))
     similarity_weight_keyword_keyword: float = float(os.getenv("RECO_SIM_WEIGHT_KEYWORD_KEYWORD", "1.0"))
     similarity_weight_stock_stock: float = float(os.getenv("RECO_SIM_WEIGHT_STOCK_STOCK", "1.15"))
