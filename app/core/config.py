@@ -45,6 +45,12 @@ class Settings:
     behavior_mix_weight: int = int(os.getenv("RECO_BEHAVIOR_MIX_WEIGHT", "2"))
     breaking_mix_weight: int = int(os.getenv("RECO_BREAKING_MIX_WEIGHT", os.getenv("RECO_PATH_B_MIX_WEIGHT", "1")))
     popular_mix_weight: int = int(os.getenv("RECO_POPULAR_MIX_WEIGHT", "1"))
+    bandit_allocator: str = os.getenv("RECO_BANDIT_ALLOCATOR", "fixed")
+    bandit_batch_size: int = int(os.getenv("RECO_BANDIT_BATCH_SIZE", "20"))
+    bandit_min_items_per_path: int = int(os.getenv("RECO_BANDIT_MIN_ITEMS_PER_PATH", "2"))
+    bandit_prior_alpha: float = float(os.getenv("RECO_BANDIT_PRIOR_ALPHA", "2"))
+    bandit_prior_beta: float = float(os.getenv("RECO_BANDIT_PRIOR_BETA", "2"))
+    bandit_state_key_prefix: str = os.getenv("RECO_BANDIT_STATE_KEY_PREFIX", "recommend:bandit")
     prefetch_primary_low_watermark: int = int(
         os.getenv("RECO_PREFETCH_PRIMARY_LOW_WATERMARK", os.getenv("RECO_PREFETCH_PATH_A_LOW_WATERMARK", "20"))
     )

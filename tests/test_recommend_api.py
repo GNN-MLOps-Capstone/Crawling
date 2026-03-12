@@ -10,6 +10,7 @@ from app.repositories.news_repository import NewsCandidate, NewsRepository
 from app.schemas.recommend import RecommendNewsRequest
 import app.services.recommend_service as recommend_service_module
 from app.services.context_builder import RecommendContextBuilder
+from app.services.bandit_service import BanditArm, BanditPosterior, BanditService, NullBanditStateStore
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import InMemorySessionCache
@@ -143,6 +144,16 @@ def _client_with_ids(news_ids: list[int]) -> TestClient:
 
 
 def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+        min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+    )
     service = RecommendService(
         repository=repository,
         session_cache=InMemorySessionCache(),
@@ -159,6 +170,7 @@ def _client_with_repository(repository: FakeNewsRepository) -> TestClient:
             breaking_limit=30,
             popular_limit=30,
         ),
+        bandit_service=bandit_service,
     )
     app.dependency_overrides[get_recommend_service] = lambda: service
     return TestClient(app)
@@ -524,6 +536,16 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
             breaking_limit=30,
             popular_limit=30,
         ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
     )
 
     first = service.recommend_news(
@@ -566,6 +588,16 @@ def test_stale_session_is_restored_for_cursor_pagination() -> None:
             breaking_limit=5,
             popular_limit=5,
         ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
     )
 
     first = service.recommend_news(
@@ -586,7 +618,7 @@ def test_stale_session_is_restored_for_cursor_pagination() -> None:
     assert second.meta.fallback_reason == "stale_session_restored"
 
 
-def test_mix_guardrail_promotes_breaking_into_first_window() -> None:
+def test_bandit_guardrail_promotes_breaking_into_first_window() -> None:
     entries = [
         (101, "onboarding"),
         (102, "onboarding"),
@@ -601,10 +633,211 @@ def test_mix_guardrail_promotes_breaking_into_first_window() -> None:
         (201, "breaking"),
     ]
 
-    guarded = RecommendService._apply_mix_guardrails(entries)
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+        min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+    )
+    guarded = bandit_service._apply_mix_guardrails(entries)
     first_window_paths = [path for _, path in guarded[: recommend_service_module.settings.guardrail_first_page_window]]
 
     assert "breaking" in first_window_paths
+
+
+def test_bandit_service_fixed_allocator_matches_legacy_mix_order() -> None:
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=10,
+        min_breaking_in_window=0,
+    )
+
+    mix_plan = bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101, 102, 103],
+            "behavior": [201, 202],
+            "breaking": [301, 302],
+            "popular": [401],
+        }
+    )
+
+    assert mix_plan.allocator == "fixed"
+    assert mix_plan.mix_policy == {
+        "onboarding": 2,
+        "behavior": 2,
+        "breaking": 1,
+        "popular": 1,
+    }
+    assert mix_plan.timeline_entries == [
+        (101, "onboarding"),
+        (102, "onboarding"),
+        (201, "behavior"),
+        (202, "behavior"),
+        (301, "breaking"),
+        (401, "popular"),
+        (103, "onboarding"),
+        (302, "breaking"),
+    ]
+
+
+class FakeBanditStateStore(NullBanditStateStore):
+    def __init__(
+        self,
+        *,
+        global_posteriors: dict[str, BanditPosterior] | None = None,
+        user_posteriors: dict[int, dict[str, BanditPosterior]] | None = None,
+    ) -> None:
+        self._global_posteriors = global_posteriors or {}
+        self._user_posteriors = user_posteriors or {}
+
+    def get_global_posteriors(self, *, paths: list[str]) -> dict[str, BanditPosterior]:
+        return {
+            path: self._global_posteriors.get(path, BanditPosterior())
+            for path in paths
+        }
+
+    def get_user_posteriors(self, *, user_id: int, paths: list[str]) -> dict[str, BanditPosterior]:
+        by_user = self._user_posteriors.get(user_id, {})
+        return {
+            path: by_user.get(path, BanditPosterior())
+            for path in paths
+        }
+
+
+def test_bandit_service_thompson_uses_global_plus_user_posteriors(monkeypatch) -> None:
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=10,
+        min_breaking_in_window=0,
+        allocator="thompson",
+        batch_size=8,
+        min_per_arm=1,
+        prior_alpha=2,
+        prior_beta=2,
+        state_store=FakeBanditStateStore(
+            global_posteriors={
+                "onboarding": BanditPosterior(alpha=1, beta=4),
+                "behavior": BanditPosterior(alpha=2, beta=2),
+                "breaking": BanditPosterior(alpha=1, beta=5),
+                "popular": BanditPosterior(alpha=1, beta=6),
+            },
+            user_posteriors={
+                7: {
+                    "behavior": BanditPosterior(alpha=8, beta=1),
+                }
+            },
+        ),
+    )
+
+    monkeypatch.setattr(
+        BanditService,
+        "_sample_beta",
+        staticmethod(lambda *, alpha, beta, rng: alpha / (alpha + beta)),
+    )
+
+    mix_plan = bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101, 102],
+            "behavior": [201, 202, 203, 204],
+            "breaking": [301],
+            "popular": [401],
+        },
+        user_id=7,
+    )
+
+    assert mix_plan.allocator == "thompson"
+    assert mix_plan.arm_scores["behavior"] > mix_plan.arm_scores["onboarding"]
+    assert [news_id for news_id, _ in mix_plan.timeline_entries[:4]] == [201, 101, 401, 301]
+
+
+def test_bandit_service_thompson_applies_minimum_per_path_guardrail(monkeypatch) -> None:
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=10,
+        min_breaking_in_window=0,
+        allocator="thompson",
+        batch_size=8,
+        min_per_arm=2,
+        state_store=FakeBanditStateStore(),
+    )
+
+    monkeypatch.setattr(
+        BanditService,
+        "_sample_beta",
+        staticmethod(
+            lambda *, alpha, beta, rng: {
+                (2.0, 2.0): 0.9,
+            }.get((alpha, beta), 0.1)
+        ),
+    )
+
+    mix_plan = bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101, 102, 103, 104],
+            "behavior": [201, 202, 203, 204],
+            "breaking": [301, 302],
+            "popular": [401, 402],
+        },
+        user_id=1,
+    )
+
+    first_window_paths = [path for _, path in mix_plan.timeline_entries[:8]]
+    assert first_window_paths.count("onboarding") >= 2
+    assert first_window_paths.count("behavior") >= 2
+    assert first_window_paths.count("breaking") >= 2
+    assert first_window_paths.count("popular") >= 2
+
+
+def test_bandit_service_thompson_falls_back_to_fixed_on_state_error() -> None:
+    class BrokenStore(NullBanditStateStore):
+        def get_global_posteriors(self, *, paths: list[str]) -> dict[str, BanditPosterior]:
+            del paths
+            raise ValueError("bad payload")
+
+    bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=2),
+            BanditArm(path="behavior", weight=2),
+            BanditArm(path="breaking", weight=1),
+            BanditArm(path="popular", weight=1),
+        ),
+        first_page_window=10,
+        min_breaking_in_window=0,
+        allocator="thompson",
+        state_store=BrokenStore(),
+    )
+
+    mix_plan = bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101, 102, 103],
+            "behavior": [201, 202],
+            "breaking": [301],
+            "popular": [401],
+        },
+        user_id=1,
+    )
+
+    assert mix_plan.allocator == "fixed"
+    assert mix_plan.fallback_reason == "bandit_allocator_failed"
 
 
 def test_popular_candidates_are_served_as_path_c() -> None:
@@ -643,6 +876,16 @@ def test_popular_candidates_are_served_as_path_c() -> None:
             breaking_limit=0,
             popular_limit=2,
         ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
     )
 
     response = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, context={}))
@@ -662,32 +905,5 @@ def test_recommendation_response_emits_impression_logs(monkeypatch) -> None:
     assert response.status_code == 200
     assert len(captured) == 2
     assert captured[0].news_id == 21
-    assert captured[0].rank == 1
-    assert captured[0].path == "onboarding"
-
-
-def test_click_endpoint_logs_path_from_served_session(monkeypatch) -> None:
-    client = _client_with_ids([21, 20, 19, 18])
-    captured = []
-
-    monkeypatch.setattr(recommend_service_module, "log_click", lambda payload: captured.append(payload))
-
-    first = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
-    assert first.status_code == 200
-    body = first.json()
-
-    response = client.post(
-        "/recommend/news/click",
-        json={
-            "request_id": body["request_id"],
-            "user_id": 1,
-            "news_id": body["items"][0]["news_id"],
-        },
-    )
-
-    assert response.status_code == 202
-    assert response.json() == {"status": "accepted"}
-    assert len(captured) == 1
-    assert captured[0].news_id == body["items"][0]["news_id"]
     assert captured[0].rank == 1
     assert captured[0].path == "onboarding"

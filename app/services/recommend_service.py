@@ -15,12 +15,11 @@ from app.schemas.recommend import (
 )
 from app.services.context_builder import RecommendContextBuilder
 from app.services.cursor_service import CursorError, CursorPayload, decode_cursor, encode_cursor
+from app.services.bandit_service import BanditService
 from app.services.recommend_logging import (
-    ClickLog,
     ImpressionLog,
     RequestLog,
     context_hash,
-    log_click,
     log_impression,
     log_request,
     now_ts,
@@ -37,6 +36,7 @@ class RecommendService:
     session_cache: SessionCache
     context_builder: RecommendContextBuilder
     retrieval_service: RetrievalService
+    bandit_service: BanditService
 
     def recommend_news(self, request: RecommendNewsRequest) -> RecommendNewsResponse:
         started_at = perf_counter()
@@ -137,38 +137,6 @@ class RecommendService:
             ),
         )
 
-    def record_click(
-        self,
-        *,
-        request_id: str,
-        user_id: int,
-        news_id: int,
-        rank: int | None = None,
-    ) -> None:
-        session = self.session_cache.get(request_id)
-        if session is None:
-            raise CursorError("session not found for request_id")
-
-        resolved_rank = rank
-        if resolved_rank is None:
-            try:
-                resolved_rank = session.served_ids.index(news_id) + 1
-            except ValueError as exc:
-                raise CursorError("news_id not found in served session") from exc
-
-        path = session.timeline_path_map.get(news_id, "unknown")
-        log_click(
-            ClickLog(
-                timestamp=now_ts(),
-                request_id=request_id,
-                session_id=request_id,
-                user_id=user_id,
-                news_id=news_id,
-                rank=resolved_rank,
-                path=path,
-            )
-        )
-
     def _build_session(
         self,
         *,
@@ -185,19 +153,21 @@ class RecommendService:
         )
         retrieval = self.retrieval_service.retrieve(context=context, exclude_ids=exclude_ids or set())
 
-        timeline_entries = self._mix_paths(
-            onboarding_ids=[item.news_id for item in retrieval.onboarding],
-            behavior_ids=[item.news_id for item in retrieval.behavior],
-            breaking_ids=[item.news_id for item in retrieval.breaking],
-            popular_ids=[item.news_id for item in retrieval.popular],
+        mix_plan = self.bandit_service.build_mix_plan(
+            path_candidates={
+                "onboarding": [item.news_id for item in retrieval.onboarding],
+                "behavior": [item.news_id for item in retrieval.behavior],
+                "breaking": [item.news_id for item in retrieval.breaking],
+                "popular": [item.news_id for item in retrieval.popular],
+            },
+            user_id=request.user_id,
         )
-        timeline_entries = self._apply_mix_guardrails(timeline_entries)
         prefix_ids = served_prefix_ids or []
         prefix_path_map = served_prefix_path_map or {}
-        timeline_ids = prefix_ids + [news_id for news_id, _ in timeline_entries]
+        timeline_ids = prefix_ids + [news_id for news_id, _ in mix_plan.timeline_entries]
         timeline_path_map = {
             **prefix_path_map,
-            **{news_id: path for news_id, path in timeline_entries},
+            **{news_id: path for news_id, path in mix_plan.timeline_entries},
         }
         source = f"multipath_{context.user_state}"
         fallback_used = retrieval.fallback_used or not timeline_ids
@@ -219,12 +189,8 @@ class RecommendService:
             behavior_queue=[item.news_id for item in retrieval.behavior],
             breaking_queue=[item.news_id for item in retrieval.breaking],
             popular_queue=[item.news_id for item in retrieval.popular],
-            current_mix_policy={
-                "onboarding": settings.onboarding_mix_weight,
-                "behavior": settings.behavior_mix_weight,
-                "breaking": settings.breaking_mix_weight,
-                "popular": settings.popular_mix_weight,
-            },
+            current_mix_policy=mix_plan.mix_policy,
+            mix_allocator=mix_plan.allocator,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             source=source,
@@ -284,19 +250,26 @@ class RecommendService:
             repository=self.repository,
         )
         retrieval = self.retrieval_service.retrieve(context=context, exclude_ids=set(session.timeline_ids))
-        appended_entries = self._mix_paths(
-            onboarding_ids=[item.news_id for item in retrieval.onboarding],
-            behavior_ids=[item.news_id for item in retrieval.behavior],
-            breaking_ids=[item.news_id for item in retrieval.breaking],
-            popular_ids=[item.news_id for item in retrieval.popular],
+        mix_plan = self.bandit_service.build_mix_plan(
+            path_candidates={
+                "onboarding": [item.news_id for item in retrieval.onboarding],
+                "behavior": [item.news_id for item in retrieval.behavior],
+                "breaking": [item.news_id for item in retrieval.breaking],
+                "popular": [item.news_id for item in retrieval.popular],
+            },
+            user_id=session.user_id,
         )
-        appended = [news_id for news_id, _ in appended_entries]
+        appended = [news_id for news_id, _ in mix_plan.timeline_entries]
         session.prefetched_timeline_ids = appended
-        session.prefetched_timeline_path_map = {news_id: path for news_id, path in appended_entries}
+        session.prefetched_timeline_path_map = {
+            news_id: path for news_id, path in mix_plan.timeline_entries
+        }
         session.prefetched_onboarding_queue = [item.news_id for item in retrieval.onboarding]
         session.prefetched_behavior_queue = [item.news_id for item in retrieval.behavior]
         session.prefetched_breaking_queue = [item.news_id for item in retrieval.breaking]
         session.prefetched_popular_queue = [item.news_id for item in retrieval.popular]
+        session.current_mix_policy = mix_plan.mix_policy
+        session.mix_allocator = mix_plan.allocator
         session.prefetch_status = "ready" if appended else "empty"
         session.batch_generation_id += 1
         session.touch()
@@ -435,139 +408,6 @@ class RecommendService:
             "latest": "LATEST",
         }
         return path_map.get(path, path.upper())
-
-    @staticmethod
-    def _mix_paths(
-        *,
-        onboarding_ids: list[int],
-        behavior_ids: list[int],
-        breaking_ids: list[int],
-        popular_ids: list[int],
-    ) -> list[tuple[int, str]]:
-        mixed: list[tuple[int, str]] = []
-        seen: set[int] = set()
-        index_onboarding = 0
-        index_behavior = 0
-        index_breaking = 0
-        index_popular = 0
-
-        while (
-            index_onboarding < len(onboarding_ids)
-            or index_behavior < len(behavior_ids)
-            or index_breaking < len(breaking_ids)
-            or index_popular < len(popular_ids)
-        ):
-            for _ in range(settings.onboarding_mix_weight):
-                if index_onboarding >= len(onboarding_ids):
-                    break
-                news_id = onboarding_ids[index_onboarding]
-                index_onboarding += 1
-                if news_id not in seen:
-                    mixed.append((news_id, "onboarding"))
-                    seen.add(news_id)
-
-            for _ in range(settings.behavior_mix_weight):
-                if index_behavior >= len(behavior_ids):
-                    break
-                news_id = behavior_ids[index_behavior]
-                index_behavior += 1
-                if news_id not in seen:
-                    mixed.append((news_id, "behavior"))
-                    seen.add(news_id)
-
-            for _ in range(settings.breaking_mix_weight):
-                if index_breaking >= len(breaking_ids):
-                    break
-                news_id = breaking_ids[index_breaking]
-                index_breaking += 1
-                if news_id not in seen:
-                    mixed.append((news_id, "breaking"))
-                    seen.add(news_id)
-
-            for _ in range(settings.popular_mix_weight):
-                if index_popular >= len(popular_ids):
-                    break
-                news_id = popular_ids[index_popular]
-                index_popular += 1
-                if news_id not in seen:
-                    mixed.append((news_id, "popular"))
-                    seen.add(news_id)
-
-            if (
-                index_onboarding >= len(onboarding_ids)
-                and index_behavior >= len(behavior_ids)
-                and index_breaking >= len(breaking_ids)
-                and index_popular >= len(popular_ids)
-            ):
-                break
-
-        return mixed
-
-    @staticmethod
-    def _apply_mix_guardrails(timeline_entries: list[tuple[int, str]]) -> list[tuple[int, str]]:
-        if not timeline_entries:
-            return timeline_entries
-
-        guarded = timeline_entries[:]
-        window_size = min(settings.guardrail_first_page_window, len(guarded))
-        requirements = (("breaking", settings.guardrail_min_breaking_in_window),)
-        required_paths = {required_path for required_path, min_count in requirements if min_count > 0}
-        for required_path, min_count in requirements:
-            if min_count <= 0:
-                continue
-            guarded = RecommendService._promote_path_into_window(
-                timeline_entries=guarded,
-                path=required_path,
-                min_count=min_count,
-                window_size=window_size,
-                protected_paths=required_paths,
-            )
-        return guarded
-
-    @staticmethod
-    def _promote_path_into_window(
-        *,
-        timeline_entries: list[tuple[int, str]],
-        path: str,
-        min_count: int,
-        window_size: int,
-        protected_paths: set[str],
-    ) -> list[tuple[int, str]]:
-        if window_size <= 0:
-            return timeline_entries
-
-        updated = timeline_entries[:]
-        existing_count = sum(1 for _, item_path in updated[:window_size] if item_path == path)
-        if existing_count >= min_count:
-            return updated
-
-        for index in range(window_size, len(updated)):
-            if updated[index][1] != path:
-                continue
-            swap_target = RecommendService._find_swap_target(
-                timeline_entries=updated,
-                protected_paths=protected_paths,
-                window_size=window_size,
-            )
-            if swap_target is None:
-                break
-            updated[swap_target], updated[index] = updated[index], updated[swap_target]
-            existing_count += 1
-            if existing_count >= min_count:
-                break
-        return updated
-
-    @staticmethod
-    def _find_swap_target(
-        *,
-        timeline_entries: list[tuple[int, str]],
-        protected_paths: set[str],
-        window_size: int,
-    ) -> int | None:
-        for index in range(window_size - 1, -1, -1):
-            if timeline_entries[index][1] not in protected_paths:
-                return index
-        return None
 
     @staticmethod
     def _resolve_fallback_reason(*, context, retrieval_fallback_reason: str | None) -> str | None:

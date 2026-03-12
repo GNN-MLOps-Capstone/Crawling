@@ -5,13 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.config import settings
 from app.repositories.news_repository import NewsRepository
 from app.schemas.recommend import (
-    RecommendClickRequest,
-    RecommendClickResponse,
     RecommendNewsRequest,
     RecommendNewsResponse,
 )
 from app.services.context_builder import RecommendContextBuilder
 from app.services.cursor_service import CursorError
+from app.services.bandit_service import BanditArm, BanditService, build_bandit_state_store
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import build_session_cache
@@ -21,6 +20,12 @@ _session_cache = build_session_cache(
     host=settings.redis_host,
     port=settings.redis_port,
     password=settings.redis_password,
+)
+_bandit_state_store = build_bandit_state_store(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    password=settings.redis_password,
+    key_prefix=settings.bandit_state_key_prefix,
 )
 
 
@@ -42,6 +47,22 @@ def get_recommend_service() -> RecommendService:
             breaking_limit=settings.breaking_candidate_limit,
             popular_limit=settings.popular_candidate_limit,
             blocked_domains=settings.blocked_domains,
+        ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=settings.onboarding_mix_weight),
+                BanditArm(path="behavior", weight=settings.behavior_mix_weight),
+                BanditArm(path="breaking", weight=settings.breaking_mix_weight),
+                BanditArm(path="popular", weight=settings.popular_mix_weight),
+            ),
+            first_page_window=settings.guardrail_first_page_window,
+            min_breaking_in_window=settings.guardrail_min_breaking_in_window,
+            allocator=settings.bandit_allocator,
+            batch_size=settings.bandit_batch_size,
+            min_per_arm=settings.bandit_min_items_per_path,
+            prior_alpha=settings.bandit_prior_alpha,
+            prior_beta=settings.bandit_prior_beta,
+            state_store=_bandit_state_store,
         ),
     )
 
@@ -68,33 +89,3 @@ def recommend_news(
                 }
             },
         ) from exc
-
-
-@router.post(
-    "/recommend/news/click",
-    response_model=RecommendClickResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def record_recommend_click(
-    request: RecommendClickRequest,
-    service: RecommendService = Depends(get_recommend_service),
-) -> RecommendClickResponse:
-    try:
-        service.record_click(
-            request_id=request.request_id,
-            user_id=request.user_id,
-            news_id=request.news_id,
-            rank=request.rank,
-        )
-    except CursorError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "code": "RECOMMENDATION_SESSION_NOT_FOUND",
-                    "message": str(exc),
-                    "request_id": request.request_id,
-                }
-            },
-        ) from exc
-    return RecommendClickResponse(status="accepted")

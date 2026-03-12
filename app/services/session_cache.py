@@ -21,6 +21,7 @@ class RecommendationSession:
     popular_queue: list[int] = field(default_factory=list)
     served_ids: list[int] = field(default_factory=list)
     current_mix_policy: dict[str, int] = field(default_factory=dict)
+    mix_allocator: str = "fixed"
     batch_generation_id: int = 1
     created_at: float = field(default_factory=time.time)
     last_served_at: float = field(default_factory=time.time)
