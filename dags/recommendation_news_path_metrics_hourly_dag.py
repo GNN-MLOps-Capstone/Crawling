@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import os
+import sys
+
 import pendulum
 from datetime import timedelta
 
+from airflow.decorators import task
 from airflow.models.dag import DAG
 from airflow.models.param import Param
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+CURRENT_DAG_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DAG_DIR not in sys.path:
+    sys.path.append(CURRENT_DAG_DIR)
+
+from modules.serving.bandit_posterior import update_bandit_posteriors
 
 
 default_args = {
@@ -46,4 +56,22 @@ with DAG(
         sql="sql/build_recommendation_path_a2_snapshot.sql",
     )
 
-    aggregate_hourly_metrics >> build_path_c_snapshot >> build_path_a2_snapshot
+    @task(task_id="update_bandit_posteriors")
+    def task_update_bandit_posteriors(**context) -> dict[str, int]:
+        data_interval_end = context["data_interval_end"]
+        dag_conf = context["dag_run"].conf if context.get("dag_run") and context["dag_run"].conf else {}
+        window_end = dag_conf.get("window_end") or data_interval_end.to_iso8601_string()
+        return update_bandit_posteriors(
+            postgres_conn_id="news_data_db",
+            redis_host=os.getenv("REDIS_HOST", "redis"),
+            redis_port=int(os.getenv("REDIS_PORT", "6379")),
+            redis_password=os.getenv("REDIS_PASSWORD"),
+            key_prefix=os.getenv("RECO_BANDIT_STATE_KEY_PREFIX", "recommend:bandit"),
+            window_end=window_end,
+            lookback_hours=int(os.getenv("RECO_BANDIT_LOOKBACK_HOURS", "72")),
+            dwell_threshold_seconds=int(os.getenv("RECO_VALID_READ_DWELL_SECONDS", "5")),
+        )
+
+    update_bandit_posteriors_task = task_update_bandit_posteriors()
+
+    aggregate_hourly_metrics >> build_path_c_snapshot >> build_path_a2_snapshot >> update_bandit_posteriors_task
