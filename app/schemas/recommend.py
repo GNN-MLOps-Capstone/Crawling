@@ -43,16 +43,3 @@ class RecommendNewsResponse(BaseModel):
     items: list[RecommendNewsItem]
     next_cursor: str | None
     meta: RecommendNewsMeta
-
-
-class RecommendClickRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str = Field(min_length=1)
-    user_id: int
-    news_id: int
-    rank: int | None = Field(default=None, ge=1)
-
-
-class RecommendClickResponse(BaseModel):
-    status: str

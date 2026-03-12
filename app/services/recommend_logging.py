@@ -54,27 +54,12 @@ class ImpressionLog:
     batch_generation_id: int
 
 
-@dataclass(frozen=True)
-class ClickLog:
-    timestamp: float
-    request_id: str
-    session_id: str
-    user_id: int
-    news_id: int
-    rank: int
-    path: str
-
-
 def log_request(payload: RequestLog) -> None:
     logger.info("recommend_request %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
 
 
 def log_impression(payload: ImpressionLog) -> None:
     logger.info("recommend_impression %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
-
-
-def log_click(payload: ClickLog) -> None:
-    logger.info("recommend_click %s", json.dumps(asdict(payload), ensure_ascii=False, sort_keys=True))
 
 
 def now_ts() -> float:
