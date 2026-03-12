@@ -22,6 +22,7 @@ DOCKER_NETWORK = 'crawling_news-network'
 SILVER_DATASET = Dataset("s3://silver/trainset")
 GOLD_MODEL_ARTIFACT = Dataset("s3://gold/gnn")
 DEFAULT_EXPERIMENT_NAME = "News_GNN_v1"
+STAGE_ROOT = '/home/dobi/Crawling/tmp/gnn_split_test'
 
 default_args = {
     'owner': 'dongbin',
@@ -42,7 +43,7 @@ default_args = {
             type="string", format="date", description="학습할 데이터 날짜"
         ),
         "gate_threshold": Param(
-            default=0.24,
+            default=0.23,
             type="number",
             description="Promote to candidate if holdout_final_final_score > threshold"
         )
@@ -93,14 +94,17 @@ def training_pipeline():
             "trainset_path": trainset_path,
             "output_path": output_path,
             "candidate_version": f"v_{date_nodash}",
+            "stage_subdir": f"date={date_nodash}",
             "aws": aws_info,
             "config": config
         }
 
     config_data = prepare_config()
+    shared_mounts = [
+        Mount(source='/home/dobi/Crawling/dags/modules', target='/app/modules', type='bind'),
+        Mount(source=STAGE_ROOT, target='/app/tmp/gnn_split_test', type='bind')
+    ]
 
-    # DockerOperator 실행
-    # 실제 Python 모듈 실행은 이 컨테이너 안에서 일어납니다.
     train_task = DockerOperator(
         task_id='train_gnn_model',
         image=DOCKER_IMAGE,
@@ -109,29 +113,22 @@ def training_pipeline():
         mount_tmp_dir=False,
         network_mode=DOCKER_NETWORK,
         outlets=[GOLD_MODEL_ARTIFACT],
-
-        # [중요] 모듈 폴더를 컨테이너 내 /app/modules 로 마운트
-        mounts=[
-            Mount(source='/home/dobi/Crawling/dags/modules', target='/app/modules', type='bind')
-        ],
+        mounts=shared_mounts,
         device_requests=[
             DeviceRequest(count=-1, capabilities=[['gpu']])
         ],
-        # [중요] modules.training.trainer 패키지 경로 사용
         command="""
         python -c "
 import os, json
-from modules.training.trainer import run_training_pipeline
+from modules.training.trainer import run_training_stage
 
-# 환경변수에서 문자열로 된 설정을 파싱
 path_in = os.environ['TRAINSET_PATH']
 path_out = os.environ['OUTPUT_PATH']
 aws = json.loads(os.environ['AWS_INFO_JSON'])
 cfg = json.loads(os.environ['CONFIG_JSON'])
 gate_threshold = float(os.environ.get('GATE_THRESHOLD', '0.25'))
 
-# Trainer 실행
-run_training_pipeline(path_in, path_out, aws, cfg, gate_threshold=gate_threshold)
+run_training_stage(path_in, path_out, aws, cfg, os.environ['STAGE_DIR_IN_CONTAINER'], gate_threshold=gate_threshold)
         "
         """,
         environment={
@@ -139,7 +136,38 @@ run_training_pipeline(path_in, path_out, aws, cfg, gate_threshold=gate_threshold
             'OUTPUT_PATH': "{{ ti.xcom_pull(task_ids='prepare_config')['output_path'] }}",
             'AWS_INFO_JSON': "{{ ti.xcom_pull(task_ids='prepare_config')['aws'] | tojson }}",
             'CONFIG_JSON': "{{ ti.xcom_pull(task_ids='prepare_config')['config'] | tojson }}",
+            'STAGE_DIR_IN_CONTAINER': "/app/tmp/gnn_split_test/{{ ti.xcom_pull(task_ids='prepare_config')['stage_subdir'] }}",
             'GATE_THRESHOLD': "{{ params.gate_threshold }}",
+            'MLFLOW_TRACKING_URI': 'http://mlflow:5000',
+        },
+    )
+
+    evaluate_task = DockerOperator(
+        task_id='evaluate_gnn_model',
+        image=DOCKER_IMAGE,
+        api_version='auto',
+        auto_remove='never',
+        mount_tmp_dir=False,
+        network_mode=DOCKER_NETWORK,
+        outlets=[GOLD_MODEL_ARTIFACT],
+        mounts=shared_mounts,
+        device_requests=[
+            DeviceRequest(count=-1, capabilities=[['gpu']])
+        ],
+        command="""
+        python -c "
+import os, json
+from modules.training.trainer import run_evaluation_stage
+
+run_evaluation_stage(
+    os.environ['STAGE_DIR_IN_CONTAINER'],
+    json.loads(os.environ['AWS_INFO_JSON'])
+)
+        "
+        """,
+        environment={
+            'STAGE_DIR_IN_CONTAINER': "/app/tmp/gnn_split_test/{{ ti.xcom_pull(task_ids='prepare_config')['stage_subdir'] }}",
+            'AWS_INFO_JSON': "{{ ti.xcom_pull(task_ids='prepare_config')['aws'] | tojson }}",
             'MLFLOW_TRACKING_URI': 'http://mlflow:5000',
         },
     )
@@ -196,7 +224,7 @@ run_training_pipeline(path_in, path_out, aws, cfg, gate_threshold=gate_threshold
         reset_dag_run=False,
     )
 
-    config_data >> train_task >> check_gate >> trigger_graph2db
+    config_data >> train_task >> evaluate_task >> check_gate >> trigger_graph2db
 
 
 training_pipeline()

@@ -3,6 +3,7 @@
 import torch
 import os
 import pickle
+import json
 import mlflow
 import traceback
 import re
@@ -392,5 +393,423 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
     except Exception as e:
         print("❌ Pipeline Failed.")
+        traceback.print_exc()
+        raise e
+
+
+def _prepare_runtime_env(aws_info):
+    os.environ['AWS_ACCESS_KEY_ID'] = aws_info['access_key']
+    os.environ['AWS_SECRET_ACCESS_KEY'] = aws_info['secret_key']
+    os.environ['MLFLOW_S3_ENDPOINT_URL'] = aws_info['endpoint_url']
+    os.environ['AWS_DEFAULT_REGION'] = 'us-east-1'
+
+
+def _infer_train_date(trainset_path, config):
+    train_date = config.get('training', {}).get('train_date')
+    if train_date:
+        return train_date
+
+    match = re.search(r"date=(\d{8})", str(trainset_path))
+    if match:
+        date_token = match.group(1)
+        return f"{date_token[:4]}-{date_token[4:6]}-{date_token[6:8]}"
+
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(trainset_path))
+    return match.group(1) if match else None
+
+
+def _state_dict_to_cpu(module):
+    return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+
+def _filter_core_metrics(metrics_dict, eval_k):
+    core_keys = {
+        "val_mrr",
+        f"val_hit_at_{eval_k}",
+        "holdout_final_score",
+        "holdout_final_score_missing",
+        "holdout_final_final_score",
+        "holdout_final_final_score_missing",
+        "gold_final_score",
+        "gold_final_score_missing",
+        f"holdout_key2stock_mrr",
+        f"holdout_key2key_mrr",
+        f"holdout_stock2stock_mrr",
+        f"holdout_key2stock_hit_at_{eval_k}",
+        f"holdout_key2key_hit_at_{eval_k}",
+        f"holdout_stock2stock_hit_at_{eval_k}",
+        f"holdout_final_key2stock_mrr",
+        f"holdout_final_key2key_mrr",
+        f"holdout_final_stock2stock_mrr",
+        f"holdout_final_key2stock_hit_at_{eval_k}",
+        f"holdout_final_key2key_hit_at_{eval_k}",
+        f"holdout_final_stock2stock_hit_at_{eval_k}",
+    }
+    return {k: v for k, v in metrics_dict.items() if k in core_keys}
+
+
+def _build_model(raw_data, config, device):
+    return Model(
+        hidden_dim=config['model']['hidden_dim'],
+        out_dim=config['model']['out_dim'],
+        news_feat_dim=raw_data['news'].x.shape[1],
+        keyword_feat_dim=raw_data['keyword'].x.shape[1],
+        stock_feat_dim=raw_data['stock'].x.shape[1],
+        config=config
+    ).to(device)
+
+
+def run_training_stage(trainset_path, output_path, aws_info, config, stage_dir, gate_threshold=0.25):
+    print(f"🚀 [Trainer] Start Training Stage: {config.get('mlflow', {}).get('experiment_name')}", flush=True)
+    _prepare_runtime_env(aws_info)
+
+    try:
+        os.makedirs(stage_dir, exist_ok=True)
+        train_date = _infer_train_date(trainset_path, config)
+        seed = config.get('training', {}).get('seed', 42)
+        set_seed(seed)
+
+        raw_data, name_to_idx_map, _, _ = load_data_from_s3(trainset_path, aws_info, config=config)
+        golden_cases = load_json_file('golden_cases.json')
+        (train_data, val_data, test_data), target_edge_types = preprocess_data(
+            raw_data,
+            val_ratio=config['training'].get('val_ratio', 0.1),
+            test_ratio=config['training'].get('test_ratio', 0.1),
+            config=config,
+        )
+        del test_data
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = _build_model(raw_data, config, device)
+        optimizer = Adam(model.parameters(), lr=config['training']['lr'])
+        train_data = train_data.to(device)
+
+        mlflow_conf = config.get('mlflow', {})
+        mlflow.set_experiment(mlflow_conf.get('experiment_name', 'Default'))
+
+        selection_metric = config.get('training', {}).get('selection_metric', 'val_mrr')
+        selection_mode = config.get('training', {}).get('selection_mode', 'max')
+        eval_k = config['training'].get('eval_k', 10)
+        implicit_seed = config['training'].get('implicit_eval_seed', seed)
+        implicit_sample_limit = config['training'].get('implicit_sample_limit', 500)
+
+        best_metric = None
+        best_epoch = 0
+        best_state = None
+
+        with mlflow.start_run() as run:
+            log_file_artifact('golden_cases.json')
+            mlflow.log_params(config['model'])
+            mlflow.log_params(config['training'])
+            mlflow.log_param("trainset_path", str(trainset_path))
+            if train_date:
+                mlflow.log_param("train_date", str(train_date))
+
+            for k, v in mlflow_conf.get('tags', {}).items():
+                mlflow.set_tag(k, v)
+            mlflow.set_tag("trainset_path", str(trainset_path))
+            if train_date:
+                mlflow.set_tag("train_date", str(train_date))
+            metric_schema = config.get('training', {}).get('metric_schema', 'v2')
+            mlflow.set_tag('metric_schema', metric_schema)
+            mlflow.set_tag("artifact_store_mode", "mlflow_only")
+            mlflow.set_tag('selection_metric', selection_metric)
+            mlflow.set_tag('selection_mode', selection_mode)
+
+            epochs = config['training']['epochs']
+            batch_size = config['training'].get('batch_size', 4096)
+            temperature = config['training'].get('temperature', 0.1)
+            loss_mode = config['training'].get('loss_mode', 'infonce')
+            weighting = config['training'].get('weighting', 'log1p')
+            min_train_cooccur = config['training'].get('min_train_cooccur', 1)
+            enable_low_cooccur_filter = config['training'].get('enable_low_cooccur_filter', False)
+
+            for epoch in range(1, epochs + 1):
+                loss, train_stats = train_one_epoch(
+                    model, optimizer, train_data, None, target_edge_types,
+                    batch_size=batch_size,
+                    temperature=temperature,
+                    loss_mode=loss_mode,
+                    weighting=weighting,
+                    min_train_cooccur=min_train_cooccur,
+                    enable_low_cooccur_filter=enable_low_cooccur_filter
+                )
+
+                if epoch % 10 == 0 or epoch == epochs:
+                    val_data_gpu = val_data.to(device)
+                    try:
+                        metrics = evaluate(
+                            model,
+                            val_data_gpu,
+                            target_edge_types,
+                            k=eval_k,
+                            eval_implicit=False,
+                            split_prefix="val",
+                            implicit_seed=implicit_seed,
+                            implicit_sample_limit=implicit_sample_limit,
+                            compute_final_score=False,
+                        )
+                    finally:
+                        del val_data_gpu
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+                    if name_to_idx_map and golden_cases:
+                        gold_metrics = evaluate_golden_set(
+                            model, raw_data, golden_cases, name_to_idx_map, device, k=eval_k
+                        )
+                        metrics.update(gold_metrics)
+
+                    print(
+                        f"Ep {epoch:03d} | Loss: {loss:.4f} | "
+                        f"{selection_metric}: {metrics.get(selection_metric, 0):.4f} | "
+                        f"avg_w: {train_stats.get('train_avg_weight', 0.0):.4f} | "
+                        f"used_ratio: {train_stats.get('train_positive_used_ratio', 0.0):.3f}",
+                        flush=True
+                    )
+
+                    mlflow.log_metric("loss", loss, step=epoch)
+                    for k, v in train_stats.items():
+                        mlflow.log_metric(k, v, step=epoch)
+                    for k, v in _filter_core_metrics(metrics, eval_k).items():
+                        mlflow.log_metric(k, v, step=epoch)
+
+                    current_metric = metrics.get(selection_metric)
+                    if current_metric is not None:
+                        if best_metric is None:
+                            best_metric = current_metric
+                            best_epoch = epoch
+                            best_state = _state_dict_to_cpu(model)
+                        elif selection_mode == 'min' and current_metric < best_metric:
+                            best_metric = current_metric
+                            best_epoch = epoch
+                            best_state = _state_dict_to_cpu(model)
+                        elif selection_mode != 'min' and current_metric > best_metric:
+                            best_metric = current_metric
+                            best_epoch = epoch
+                            best_state = _state_dict_to_cpu(model)
+                else:
+                    mlflow.log_metric("loss", loss, step=epoch)
+                    for k, v in train_stats.items():
+                        mlflow.log_metric(k, v, step=epoch)
+
+            if best_state is None:
+                best_state = _state_dict_to_cpu(model)
+                best_epoch = epochs
+
+            final_state = _state_dict_to_cpu(model)
+            best_path = os.path.join(stage_dir, "best_model.pt")
+            final_path = os.path.join(stage_dir, "final_model.pt")
+            metadata_path = os.path.join(stage_dir, "stage_metadata.json")
+            config_path = os.path.join(stage_dir, "config_snapshot.json")
+
+            torch.save(best_state, best_path)
+            torch.save(final_state, final_path)
+
+            metadata = {
+                "trainset_path": trainset_path,
+                "output_path": output_path,
+                "gate_threshold": gate_threshold,
+                "best_epoch": best_epoch,
+                "best_metric": best_metric if best_metric is not None else 0.0,
+                "selection_metric": selection_metric,
+                "selection_mode": selection_mode,
+                "eval_k": eval_k,
+                "implicit_eval_seed": implicit_seed,
+                "implicit_sample_limit": implicit_sample_limit,
+                "train_run_id": run.info.run_id,
+            }
+
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=True, indent=2)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=True, indent=2)
+
+            mlflow.log_artifact(best_path)
+            mlflow.log_artifact(final_path)
+            mlflow.log_artifact(metadata_path)
+            mlflow.log_artifact(config_path)
+            if best_metric is not None:
+                mlflow.log_metric("summary_best_epoch", best_epoch)
+                mlflow.log_metric("summary_selection_value", best_metric)
+                mlflow.set_tag("summary_selection_metric", selection_metric)
+                mlflow.set_tag("summary_selection_mode", selection_mode)
+
+        print("✅ Training Stage Finished.", flush=True)
+        return best_metric if best_metric is not None else 0.0
+    except Exception as e:
+        print("❌ Training Stage Failed.")
+        traceback.print_exc()
+        raise e
+
+
+def run_evaluation_stage(stage_dir, aws_info):
+    print("🚀 [Trainer] Start Evaluation Stage", flush=True)
+    _prepare_runtime_env(aws_info)
+
+    try:
+        with open(os.path.join(stage_dir, "config_snapshot.json"), 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        with open(os.path.join(stage_dir, "stage_metadata.json"), 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+
+        trainset_path = metadata["trainset_path"]
+        output_path = metadata["output_path"]
+        gate_threshold = float(metadata["gate_threshold"])
+        eval_k = int(metadata["eval_k"])
+        implicit_seed = metadata["implicit_eval_seed"]
+        implicit_sample_limit = int(metadata["implicit_sample_limit"])
+        parent_run_id = metadata.get("train_run_id")
+        best_epoch = int(metadata["best_epoch"])
+        epochs = int(config['training']['epochs'])
+
+        seed = config.get('training', {}).get('seed', 42)
+        set_seed(seed)
+
+        raw_data, name_to_idx_map, _, serving_mapping = load_data_from_s3(trainset_path, aws_info, config=config)
+        golden_cases = load_json_file('golden_cases.json')
+        (_, _, test_data), target_edge_types = preprocess_data(
+            raw_data,
+            val_ratio=config['training'].get('val_ratio', 0.1),
+            test_ratio=config['training'].get('test_ratio', 0.1),
+            config=config,
+        )
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = _build_model(raw_data, config, device)
+        mlflow_conf = config.get('mlflow', {})
+        mlflow.set_experiment(mlflow_conf.get('experiment_name', 'Default'))
+
+        run_kwargs = {}
+        if parent_run_id:
+            run_kwargs["run_id"] = parent_run_id
+
+        with mlflow.start_run(**run_kwargs) as run:
+            best_state = torch.load(os.path.join(stage_dir, "best_model.pt"), map_location='cpu')
+            final_state = torch.load(os.path.join(stage_dir, "final_model.pt"), map_location='cpu')
+
+            model.load_state_dict(best_state)
+            test_data_gpu = test_data.to(device)
+            try:
+                holdout_metrics = evaluate(
+                    model,
+                    test_data_gpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                )
+                mlflow.log_metrics(_filter_core_metrics(holdout_metrics, eval_k), step=best_epoch)
+
+                model.load_state_dict(final_state)
+                final_holdout_metrics = evaluate(
+                    model,
+                    test_data_gpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_final",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                )
+                mlflow.log_metrics(_filter_core_metrics(final_holdout_metrics, eval_k), step=epochs)
+            finally:
+                del test_data_gpu
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            print("💾 Saving Model & Embeddings...", flush=True)
+            model.eval()
+            with torch.no_grad():
+                full_gpu = raw_data.to(device)
+                emb_gpu = model.encoder(full_gpu.x_dict, full_gpu.edge_index_dict)
+
+            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_gpu.items()}
+            del emb_gpu
+            del full_gpu
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            emb_cpu = {k: v.numpy() for k, v in emb_tensor_cpu.items()}
+            local_emb_path = "/tmp/node_embeddings.pkl"
+            with open(local_emb_path, 'wb') as f:
+                pickle.dump(emb_cpu, f)
+            mlflow.log_artifact(local_emb_path)
+
+            local_mapping_path = "/tmp/node_mapping.pkl"
+            if serving_mapping:
+                with open(local_mapping_path, 'wb') as f_out:
+                    pickle.dump(serving_mapping, f_out)
+                mlflow.log_artifact(local_mapping_path)
+            else:
+                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.", flush=True)
+
+            report = build_gold_similarity_report(
+                emb_tensor_cpu,
+                golden_cases,
+                name_to_idx_map,
+                edge_index_dict=raw_data.edge_index_dict,
+                top_k=eval_k,
+                min_cooccur=3
+            )
+            if report:
+                report_path = "/tmp/gold_similarity.txt"
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(report)
+                print(report, flush=True)
+                mlflow.log_artifact(report_path)
+
+            if os.path.exists(local_emb_path): os.remove(local_emb_path)
+            if os.path.exists("/tmp/node_mapping.pkl"): os.remove("/tmp/node_mapping.pkl")
+            if os.path.exists("/tmp/gold_similarity.txt"): os.remove("/tmp/gold_similarity.txt")
+            del emb_tensor_cpu
+
+            holdout_final = holdout_metrics.get("holdout_final_score", 0.0)
+            holdout_missing = holdout_metrics.get("holdout_final_score_missing", 1.0)
+            mlflow.log_metric("summary_holdout_final_score", holdout_final)
+            mlflow.log_metric("summary_holdout_final_score_missing", holdout_missing)
+            mlflow.set_tag("summary_holdout_eval_epoch", str(best_epoch))
+
+            holdout_final2 = final_holdout_metrics.get("holdout_final_final_score", 0.0)
+            holdout_missing2 = final_holdout_metrics.get("holdout_final_final_score_missing", 1.0)
+            mlflow.log_metric("summary_holdout_final_checkpoint_score", holdout_final2)
+            mlflow.log_metric("summary_holdout_final_checkpoint_missing", holdout_missing2)
+            mlflow.set_tag("summary_holdout_final_checkpoint_epoch", str(epochs))
+
+            gate_passed = (
+                float(holdout_missing2) == 0.0 and
+                float(holdout_final2) > float(gate_threshold)
+            )
+            version_name = str(output_path).strip("/").split("/")[-1] if output_path else run.info.run_id
+
+            mlflow.log_metric("gate_threshold_holdout_final_final_score", float(gate_threshold))
+            mlflow.log_metric("gate_passed", 1.0 if gate_passed else 0.0)
+            mlflow.set_tag("gate_metric", "holdout_final_final_score")
+            mlflow.set_tag("gate_operator", ">")
+            mlflow.set_tag("gate_threshold", str(gate_threshold))
+            mlflow.set_tag("gate_require_missing_zero", "true")
+            mlflow.set_tag("gate_passed", str(gate_passed).lower())
+            mlflow.set_tag("candidate_version", version_name)
+
+            if gate_passed:
+                mlflow.set_tag("status", "candidate")
+                print(
+                    f"✅ Gate passed: holdout_final_final_score={holdout_final2:.4f} > {gate_threshold}. status=candidate",
+                    flush=True
+                )
+            else:
+                print(
+                    f"⛔ Gate blocked: score={holdout_final2:.4f}, missing={holdout_missing2}, threshold={gate_threshold}",
+                    flush=True
+                )
+
+        print("✅ Evaluation Stage Finished.", flush=True)
+        return holdout_final2
+    except Exception as e:
+        print("❌ Evaluation Stage Failed.")
         traceback.print_exc()
         raise e

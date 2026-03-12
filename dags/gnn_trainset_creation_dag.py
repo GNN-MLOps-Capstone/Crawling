@@ -48,7 +48,7 @@ def trainset_pipeline():
         params = context.get('params', {}) or {}
         dag_run = context.get("dag_run")
         conf = dag_run.conf if dag_run and dag_run.conf else {}
-        scheduled_target_date = context['logical_date'].subtract(days=1).to_date_string()
+        scheduled_target_date = context['logical_date'].to_date_string()
         run_type = str(getattr(dag_run, "run_type", "")).lower()
 
         if conf.get('target_date'):
