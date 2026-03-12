@@ -20,9 +20,13 @@
 - 요청마다 세션 캐시를 우선 확인하고, miss 시 추천 세션을 새로 생성한다.
 - 추천 계산에 필요한 사용자 신호는 외부 `context`보다 `user_id` 기준 내부 조회를 기본으로 하도록 정리 중이다.
 - 현재 구현 기준 기본 동작은 `A1(온보딩) + A2(로그) + B(속보) + C(인기 탐색)` 멀티 패스 믹싱이다.
-- `로그 기반 후보(A2)`는 최근 행동 로그 조회, 엔터티 복원, decay, Max-Sim scoring까지 반영돼 있다.
+- `로그 기반 후보(A2)`는 `recommendation_path_a2_snapshot` 기반 최근 행동 snapshot 조회, 엔터티 복원, decay, Max-Sim scoring까지 반영돼 있다.
 - `인기 탐색 후보(C)`는 최신 snapshot row의 `news_ids[]`를 읽는 read-only path로 연결돼 있다.
-- 추천 응답 시 impression 로그를 자동 적재하고, `POST /recommend/news/click`로 click 로그를 path와 함께 적재한다.
+- `MAB` 기반 동적 path allocation은 현재 서빙 경로에 연결되어 있고, 운영 기본 allocator는 `thompson`이다.
+- `fixed` allocator는 fallback 및 회귀 비교용으로 유지한다.
+- `BanditService`는 같은 인터페이스에서 `fixed`와 `thompson`을 모두 지원한다.
+- `recommendation_news_path_metrics_hourly` DAG 끝에 Redis posterior update task를 붙여 `global + user alpha/beta`를 hourly overwrite 한다.
+- 추천 응답 시 impression 로그를 자동 적재한다.
 
 ### 현재 계약
 
@@ -40,8 +44,6 @@
   - `meta.source`
   - `meta.fallback_used`
   - `meta.fallback_reason`
-- 추가 이벤트 엔드포인트
-  - `POST /recommend/news/click`
 
 ## 2. Phase 1A Checklist
 
@@ -58,13 +60,16 @@
   - 내부 조회한 온보딩/행동 신호가 personalized retrieval scoring까지 연결돼 있다.
   - `meta.source`가 `multipath_cold` / `multipath_warm` 수준으로 구분된다.
   - debug override용 `context` 스키마가 명시적으로 고정됐다.
-  - impression 자동 로그와 click 로그 적재 경로가 코드와 테스트에 반영돼 있다.
+  - impression 자동 로그 경로가 코드와 테스트에 반영돼 있다.
   - Docker 기준 추천 API 테스트, 앱 레벨 HTTP 확인, Redis-backed session cache 구성을 확인했다.
   - stale session은 기존 `served_ids`를 유지한 채 unseen 후보만 재생성하는 restore 정책으로 고정됐다.
   - 첫 page window에서 `breaking`이 완전히 사라지지 않도록 mix guardrail을 둔다.
+  - `recommend-api` 컨테이너 기본 env를 `RECO_BANDIT_ALLOCATOR=thompson`으로 전환했다.
+  - 실제 API 응답과 Redis posterior를 통해 Thompson Sampling이 운영 경로에서 동작함을 확인했다.
 - 부분 완료
-  - 로그 필드는 남아 있지만, `impression/click -> recent_actions` 데이터 루프는 아직 닫히지 않았다.
+  - API 내부 impression 로그와 외부 백엔드의 `interaction_events` 기반 행동 로그 사이의 데이터 루프는 아직 닫히지 않았다.
   - 요청 계약은 아직 `context` optional 형태를 유지하지만, 기본 경로는 `user_id(integer)` 기반 내부 조회이고 `context`는 debug override 용도로만 쓰인다.
+  - reward source는 `5초 이상 dwell`로 고정됐지만, click/short click 보조 지표는 아직 posterior update에 반영하지 않았다.
 - 미완료
   - 1A 완료 기준 전부를 만족하는 end-to-end 검증은 아직 아니다.
 
@@ -84,7 +89,7 @@
 - [x] 내부적으로 `profile`, `recent_actions`, `session_signals` 정규화 구조를 유지
 - [x] `A1`과 이후 `A2`가 서로 다른 필드를 읽을 수 있게 구조 분리
 - [x] `user_id` 기준으로 온보딩 데이터 조회 경로 정의
-- [x] `user_id` 기준으로 최근 행동 로그 조회 경로 정의
+- [x] `user_id` 기준으로 최근 행동 snapshot 조회 경로 정의
 - [x] 조회 실패/데이터 없음 시 degrade 코드 체계 정의
 
 ### 2.4 Retrieval Baseline
@@ -95,7 +100,7 @@
 - [x] 도메인 필터 입력을 retrieval 계층에서 받을 수 있게 유지
 - [x] 개인화 경로는 평균 풀링 대신 multi-interest 보존 방향으로 정의
 - [x] `A1`은 온보딩에서 선택한 키워드/종목 전체를 입력으로 쓰는 방향 확정
-- [x] `A2`는 최근 20개 클릭/유효 읽기 로그를 입력으로 쓰는 방향 확정
+- [x] `A2`는 최근 20개 행동 snapshot item을 입력으로 쓰는 방향 확정
 - [x] `keyword-keyword`, `stock-stock`, `keyword-stock` pair type별 유사도 보정 필요성 확정
 - [x] 온보딩 프로필 기반 boost 규칙 반영
 - [x] 내부 조회한 프로필/로그를 retrieval 입력으로 연결
@@ -149,9 +154,10 @@
 ### 2.9 Mixing Baseline
 
 - [x] 현재 구현은 고정 mix weight 기반 병합
+- [x] 고정 mix 로직을 `BanditService` 뒤로 분리
 - [x] path별 큐를 따로 보관하고 최종 timeline은 mix 결과로 생성
 - [x] 중복 뉴스 제거 규칙 유지
-- [x] MAB 없이도 동작하는 기본 서빙 경로 확보
+- [x] `fixed`와 `thompson`을 모두 지원하는 기본 서빙 경로 확보
 - [x] 1A 기준 운영 guardrail 문구는 `first page window` 내 `breaking` 최소 노출 규칙으로 구체화
 - [x] `Path C`를 mix path로 다시 활성화
 
@@ -161,7 +167,7 @@
 - [x] `latency_ms`, `cache_status`, `fallback_reason`, `batch_generation_id` 로그 유지
 - [x] path별 remaining count와 mix ratio 로그 적재
 - [x] `context_hash`, `context_present` 로그 적재
-- [x] impression/click 로그 실제 적재 경로 검증 필요
+- [x] impression 로그 실제 적재 경로 검증 필요
 - [x] `cold/warm` 분리 집계 기준은 request log의 `user_state` 필드로 적재
 
 ### 2.11 Validation Status
@@ -170,6 +176,7 @@
 - [x] `pytest tests/test_recommend_api.py` 재실행 확인
 - [x] FastAPI 앱 레벨 수동 확인
 - [x] Redis 연결이 실제 로컬 환경에서 정상 동작하는지 확인
+- [x] 실제 API 컨테이너에서 `RECO_BANDIT_ALLOCATOR=thompson` 설정과 `user_id=9000` 응답 path 분포를 확인
 
 ## 3. Phase 1B Checklist
 
@@ -186,23 +193,22 @@
 
 #### Spec Locked
 
-- [x] `recent_actions`는 `user_id` 기준 최근 20개 클릭/유효 읽기 로그를 기준으로 한다
-- [x] 체류 시간 `5초` 미만 로그는 제외한다
+- [x] `recent_actions`는 `user_id` 기준 최근 20개 행동 snapshot item을 기준으로 한다
+- [x] snapshot 생성 단계에서 체류 시간 `5초` 미만 로그가 제외되도록 한다
 - [x] 유니크 키워드 단위로 집계하되 빈도 정보는 유지한다
 
 #### Implementation Checklist
 
 - [x] `user_id -> recent_actions` 조회 경로 확정
-- [x] `interaction_events`에서 `content_open/content_leave`와 `content_session_id`로 읽기 세션을 복원
+- [x] API는 `recommendation_path_a2_snapshot`에서 최근 행동 snapshot을 조회하도록 반영
 - [x] warm user 활성화 기준 확정
-- [x] `content_open`과 `content_leave`를 묶어 dwell time 계산 구현
-- [x] `event_ts_client` 기준 최신성 정렬 및 decay 입력 시각 처리 구현
+- [x] snapshot의 `timestamp` 기준 최신성 정렬 및 decay 입력 시각 처리 구현
 - [x] 빈도 + 최신성 decay 가중치 계산 구현
 - [x] pair type별 similarity calibration 구현
 - [x] Max-Sim 매칭 구현
 - [x] 반복 등장 종목에 대한 entity hard match 구현
 - [x] `news_keyword_mapping`, `news_stock_mapping`으로 엔터티 복원 구현
-- [x] `interaction_events -> recent_actions` 정제 구현
+- [x] 배치에서 정제된 행동 snapshot을 retrieval 입력으로 연결
 - [x] 행동 로그 기반 후보 추출 구현
 - [x] A2 후보 수 상한 유지
 - [x] seen item 필터 적용
@@ -213,7 +219,7 @@
 - [x] `A2` 비활성화 시 `A1+B+C`로 자동 degrade
 - [x] `meta.source`에 cold/warm source 구분 반영
 - [x] `items[].path`를 응답에 포함해 path attribution을 고정
-- [x] click/read 로그에 `source_path`를 함께 적재하는 계약 고정
+- [ ] click/read 로그의 `source_path` 전달 계약은 보류
 - [x] `fallback_reason`에 `behavior_insufficient`, `profile_missing`, `user_signal_lookup_failed` 등 코드 체계 반영
 
 ## 4. Phase 2 Checklist
@@ -226,23 +232,27 @@
 - [x] MAB의 arm을 `A1`, `A2`, `B`, `C`로 고정
 - [x] action을 페이지 슬롯별 sequential sampling 기반 allocation으로 정의
 - [x] 1차 알고리즘을 경량 `Hierarchical Thompson Sampling`으로 확정
-- [x] global prior는 최근 `3일` path별 평균 reward를 사용하고 user posterior의 regularizer로 결합
+- [x] global prior와 user posterior를 단순 합산하는 방향으로 확정
+- [x] prior 초기값을 arm별 `alpha=2`, `beta=2`로 고정
 - [x] primary reward를 `5초 이상 valid dwell`로 확정
-- [x] click, short click은 보조 지표로만 유지
-- [x] cold/warm은 공통 prior를 쓰고 guardrail만 다르게 적용하는 방향으로 확정
-- [ ] 최소 노출 비율 guardrail 확정
+- [ ] click, short click은 보조 지표로만 유지
+- [x] cold/warm은 공통 prior를 사용하고 모든 사용자에 Thompson Sampling을 적용하는 방향으로 확정
+- [x] `20-slot window`에서 각 path 최소 `2개` guardrail을 기본값으로 확정
 - [ ] 충분한 로그 전까지는 fixed mix와 병행 가능한 모드 준비
 
 ### 4.2 Serving And Learning Split
 
 - [x] FastAPI는 read-only 서빙 계층으로 고정
-- [x] FastAPI는 `Redis` 저장소에서 user별 `alpha`, `beta`를 읽어 sampling만 수행
+- [x] FastAPI는 `Redis` 저장소에서 `global + user alpha/beta`를 읽어 sampling만 수행하는 skeleton을 둠
+- [x] 실제 API 운영 기본값을 `thompson`으로 전환
 - [ ] path 비활성화, queue 고갈, fallback 상황에서 arm masking 규칙 확정
 - [x] Airflow 배치가 reward 집계와 `alpha`, `beta` 업데이트를 전담하도록 설계
+- [x] `recommendation_news_path_metrics_hourly` DAG에 posterior Redis update task 연결
 - [x] update 결과 저장소는 `Redis`로 고정
 - [ ] 배치가 decay 반영된 `alpha`, `beta`를 덮어쓰는 write contract 정의
 - [x] 서빙 요청 경로에서 온라인 학습 연산이 수행되지 않도록 금지 규칙 명시
-- [x] 배치 update cadence의 기본값을 `1시간`으로 고정
+- [x] 배치 update cadence를 `recommendation_news_path_metrics_hourly_dag.py`에 붙는 `1시간` 기준으로 고정
+- [x] `Redis` read failure, payload 손상, allocator 예외 시 `fixed` allocator fallback 원칙을 확정
 
 ### 4.3 Popular Exploration Path C
 

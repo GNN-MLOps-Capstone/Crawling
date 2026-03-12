@@ -21,7 +21,7 @@
 
 - 엔드포인트는 `POST /recommend/news`다.
 - FastAPI 추천 API는 이미 존재한다.
-- 현재는 `request_id` 기반 세션 캐시와 cursor pagination 위에서 `A1(온보딩) + A2(행동) + B(속보)` 구조를 부분 반영한 상태다.
+- 현재는 `request_id` 기반 세션 캐시와 cursor pagination 위에서 `A1(온보딩) + A2(행동) + B(속보) + C(인기 탐색)` 구조를 반영한 상태다.
 - 세션 캐시, fallback, 구조화 로그는 들어가고 있으나 경로 정의와 품질 측정은 더 정리할 필요가 있다.
 
 ### v1 목표
@@ -100,12 +100,13 @@
   - `request_id`
 - `profile`, `recent_actions`, `session_signals`는 외부 입력의 필수 계약이 아니라 추천 서버 내부 정규화 결과로 본다.
 - 필요 시 디버깅/override 용 보조 입력은 둘 수 있지만, 기본 경로는 `user_id -> profile/log lookup -> normalized user signals -> retrieval`이다.
-- 초기 source map은 아래를 기준으로 한다.
+- 현재 구현의 source map은 아래를 기준으로 한다.
   - 온보딩 종목: `watchlist(user_id, stock_id)`
   - 온보딩 키워드: `user_onboarding_keywords(user_id, keyword_id)`
   - 벡터 조회: `test_service_embeddings(entity_id, entity_type, gnn_embedding)`
-  - 행동 로그: `interaction_events(user_id, event_type, news_id, content_session_id, event_ts_client, ...)`
+  - 행동 snapshot: `recommendation_path_a2_snapshot(user_id, items)`
   - 뉴스-엔터티 매핑: `news_keyword_mapping(news_id, keyword_id)`, `news_stock_mapping(news_id, stock_id)`
+- 장기적으로 행동 원천 로그는 `interaction_events(user_id, event_type, news_id, content_session_id, event_ts_client, ...)`를 기준으로 하되, 현재 API는 배치에서 정제된 snapshot을 읽는다.
 
 #### 상세 스펙: A1 & A2 Logic Definition
 
@@ -114,7 +115,8 @@
   - `Late Interaction / Max-Sim`: 유저가 가진 여러 관심사 벡터 각각에 대해, 후보 기사의 키워드 벡터 중 가장 유사한 벡터를 찾아 점수를 매긴 뒤 합산한다.
   - `Entity Boosting`: 벡터 유사도와 별개로 종목 코드가 일치하면 hard match 가산점을 부여한다.
   - `Type-Aware Similarity Calibration`: `keyword-keyword`, `stock-stock`, `keyword-stock` 쌍은 raw 유사도 분포가 다를 수 있으므로, 동일 스케일로 바로 합산하지 않는다. pair type별 normalization 또는 weight를 적용해 점수를 보정한다.
-  - `Diversity Guardrail`: Max-Sim 점수가 높더라도 동일 종목이나 동일 테마로 결과가 과도하게 몰리지 않도록, serving 단계에서 동일 종목/카테고리 반복 노출 상한을 둔다.
+  - `Guardrail`: 현재 구현의 서빙 가드레일은 다양성 전반 제어가 아니라, 첫 page window 안에서 `breaking(Path B)`가 완전히 사라지지 않도록 최소 노출을 보장하는 규칙이다.
+  - 동일 종목/카테고리 반복 노출 상한 같은 diversity guardrail은 후속 단계에서 보강한다.
 - Path A1
   - `Input`: `user_id` 기준으로 조회한 온보딩/설정의 키워드 및 종목 리스트 전체
   - `Source`: `watchlist`, `user_onboarding_keywords`
@@ -123,12 +125,13 @@
   - `Entity Boosting`: 사용자가 명시적으로 선택한 종목과 일치하는 기사에는 stronger hard match를 부여한다.
 - Path A2
   - `Input Scope`: `user_id` 기준으로 조회한 최근 20개 클릭/유효 읽기 로그만 사용한다.
-  - `Source`: `interaction_events`
-  - `Noise Filter`: 체류 시간 `5초` 미만 로그는 제외한다.
-  - `Event Definition`: 현재 구현은 `content_open`을 뉴스 진입, `content_leave`를 뉴스 이탈로 보고, 같은 `content_session_id` 값으로 연결한다.
-  - `Dwell Time`: `content_open.event_ts_client`와 `content_leave.event_ts_client` 차이로 계산한다.
-  - `Time Reference`: 최신성 계산과 정렬에는 `event_ts_client`를 우선 사용하고, `event_ts_server`는 보조 검증용으로 사용한다.
-  - `Log Structure`: 로그 1개는 `{ timestamp, news_id, extracted_keywords[], extracted_stock_entities[] }`를 기본 단위로 본다.
+  - `Current Source`: API는 `recommendation_path_a2_snapshot`의 `items[]`를 읽는다.
+  - `Upstream Source`: snapshot 생성 배치는 `interaction_events`를 원천으로 사용한다.
+  - `Noise Filter`: 체류 시간 `5초` 미만 로그는 snapshot 생성 단계에서 제외한다.
+  - `Event Definition`: upstream 배치에서는 `content_open`을 뉴스 진입, `content_leave`를 뉴스 이탈로 보고, 같은 `content_session_id` 값으로 연결한다.
+  - `Dwell Time`: upstream 배치에서 `content_open.event_ts_client`와 `content_leave.event_ts_client` 차이로 계산한다.
+  - `Time Reference`: 현재 API 구현은 snapshot의 `timestamp`를 최신성 계산과 정렬 기준으로 사용한다.
+  - `Log Structure`: snapshot item 1개는 `{ timestamp, news_id, keyword_ids[], stock_ids[] }`를 기본 단위로 본다.
   - `Grouping`: 20개 로그에서 추출된 키워드를 유니크 키워드 단위로 압축하되, 원시 출현 빈도는 유지한다.
   - `Weighting`: 빈도 `log(1+N)`와 최신성 decay를 결합해 각 키워드 및 종목의 가중치를 계산한다.
   - `Matching`: 가중치가 적용된 키워드/종목 집합을 query로 사용하되, pair type별 score calibration 이후 Max-Sim 검색을 수행한다.
@@ -146,6 +149,7 @@
   - 집계 테이블은 CTR 자체보다 CTR 계산 재료가 되는 count를 저장한다.
 - 계산 책임 분리
   - Airflow는 `recommendation_news_path_metrics_hourly` DAG에서 hourly 집계 직후 popularity snapshot을 계산하고 저장한다.
+  - 같은 DAG에서 `global + user` bandit posterior용 `alpha/beta`도 Redis에 hourly overwrite 한다.
   - FastAPI는 집계 결과와 snapshot을 read-only로 조회하고, exclude/served filter와 path mixing만 담당한다.
 - 추천 이유
   - 인기 점수 계산을 요청 latency에서 분리한다.
@@ -188,25 +192,38 @@
   - `A2`는 warm user에서 우세한 개인화 경로다.
   - `B`는 freshness 보강과 exploration을 담당한다.
   - `C`는 Airflow snapshot 기반 popularity exploration과 안전한 다양성 보강을 담당한다.
-- `MAB`의 역할은 개별 기사 점수를 다시 매기는 ranker가 아니라, `A1/A2/B/C` path를 어떤 비율로 섞을지 정하는 blender다.
-- `MAB`의 arm은 `A1`, `A2`, `B`, `C` 네 개 path다.
-- `MAB`의 action은 페이지 또는 배치 단위 슬롯을 순차적으로 sampling해 path allocation을 형성하는 것이다.
+- 장기 방향에서 `MAB`의 역할은 개별 기사 점수를 다시 매기는 ranker가 아니라, `A1/A2/B/C` path를 어떤 비율로 섞을지 정하는 blender다.
+- 장기 방향에서 `MAB`의 arm은 `A1`, `A2`, `B`, `C` 네 개 path다.
+- 장기 방향에서 `MAB`의 action은 페이지 또는 배치 단위 슬롯을 순차적으로 sampling해 path allocation을 형성하는 것이다.
 - 각 path 내부의 후보 생성과 정렬은 retrieval 계층이 담당하고, `MAB`는 최종 노출 슬롯의 path별 배분만 담당한다.
-- 최종 노출 비율은 장기적으로 `MAB`가 결정한다.
+- 현재 구현은 `BanditService` 뒤에서 allocator를 호출하고, 운영 기본값은 `thompson`이다.
+- `fixed` allocator는 fallback 및 회귀 비교용으로 유지한다.
+- 현재 `BanditService`는 `fixed`/`thompson` 두 allocator를 제공한다.
+- Thompson Sampling의 posterior 결합 방식은 `global + user` 단순 합산을 기본으로 한다.
+- prior 초기값은 모든 arm에 `alpha=2`, `beta=2`를 둔다.
+- Thompson Sampling은 cold/warm 구분 없이 모든 사용자에게 적용할 수 있게 설계하되, cold user는 사실상 `global prior` 중심으로 수렴한다.
+- 서빙 allocation 단위는 현재 API page/window와 맞춘 `20-slot batch`를 기본으로 한다.
+- Thompson Sampling은 먼저 slot allocation을 생성하고, 그 뒤에 guardrail을 후처리로 적용한다.
+- Thompson guardrail의 기본 목표는 `20-slot window` 안에서 `A1/A2/B/C` 각 path가 최소 `2개` 이상 들어가도록 보정하는 것이다.
+- `Redis` posterior 조회 실패, payload 손상, allocator 예외가 발생하면 즉시 `fixed` allocator로 fallback 한다.
+- 실제 운영 확인 기준 `user_id=9000` 응답에서는 Thompson Sampling이 `A2` 우세 allocation을 만들고, 동시에 `A1/B/C` 최소 노출 guardrail을 만족했다.
 - 다만 초기 운영에서는 아래를 먼저 둔다.
   - 고정 또는 준고정 mix ratio
-  - 최소/최대 노출 가드레일
+  - 현재 구현 기준 `first page window` 내 `breaking` 최소 노출 가드레일
   - `A2` 활성화 조건
-  - `C` 편중 방지 규칙
-- 즉, 1단계의 목표는 "MAB-ready한 서빙 구조"이고, 2단계에서 실제 bandit 자동화를 붙인다.
+  - 이후 단계에서 `C` 편중 방지 규칙과 path별 cap 보강
+- 즉, 현재 단계의 목표는 "MAB-ready한 서빙 구조"이고, 후속 단계에서 실제 bandit 자동화를 붙인다.
 
 ### 3.4 Stage 4. Session Cache And Refill
 
 - 목적: 같은 세션 안에서 추천 순서를 고정하고, 페이지 이동 시 재계산 비용을 줄인다.
 - 기본 방향
-  - 첫 요청에서 `A1/A2/B/C` path별 candidate queue를 생성한다.
-  - 세션 캐시에는 `request_id` 기준으로 `onboarding/behavior/breaking/popular queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
-  - 다음 페이지 요청은 현재 mix policy에 따라 각 queue에서 필요한 개수만큼 꺼내 page를 합성한다.
+  - 첫 요청에서 `A1/A2/B/C` path별 candidate queue를 생성하고, 현재 구현은 이 결과를 섞어 `timeline`을 먼저 만든다.
+- 세션 캐시에는 `request_id` 기준으로 `onboarding/behavior/breaking/popular queue`, `served_ids`, `current_mix_policy`, `batch_generation_id`를 저장한다.
+- 현재 코드에서는 `timeline` 생성 책임을 `BanditService`가 맡고, `RecommendService`는 retrieval 결과를 세션 형태로 저장한다.
+- Thompson mode에서도 `BanditService`는 path queue를 직접 다시 조회하지 않고, 이미 retrieval된 queue를 window 단위 allocation에 소비한다.
+  - 다음 페이지 요청은 현재 구현 기준으로 캐시된 `timeline`을 cursor offset으로 slice해 반환한다.
+  - path별 queue는 prefetch, batch rollover, remaining count 추적에 사용한다.
   - prefetch는 전체 잔량이 아니라 primary path 병목 기준으로 판단한다.
   - `popular queue`는 실시간 집계 결과가 아니라 snapshot 조회 결과를 기준으로 채운다.
 - 기대 효과
@@ -230,7 +247,8 @@
 - 요청 필드는 `user_id` 중심으로 최소화하고, 추천 서버가 내부적으로 사용자 신호를 조회하는 구조를 기본으로 한다.
 - `user_id` 요청 타입은 문자열이 아니라 `integer`다.
 - `items[].path`는 각 뉴스가 `A1`, `A2`, `B`, `C` 중 어느 path에서 왔는지 나타내는 서빙 계약이다.
-- 클라이언트는 click 또는 read 완료 로그를 보낼 때 해당 `source_path`를 함께 전달해야 한다.
+- click 또는 read 완료 로그에서 path attribution이 필요하다.
+- 다만 현재 구현 기준 path는 추천 세션의 `items[].path`와 서버 측 세션 상태를 통해 추적하는 방향을 우선한다.
 
 ### 4.2 Session And Pagination
 
@@ -242,15 +260,20 @@
 ### 4.3 Refill Principle
 
 - 추천 세션은 "매 페이지 재계산"이 아니라 "배치 생성 후 소진" 구조를 따른다.
-- 현재 batch가 남아 있으면 캐시된 path queue를 우선 사용한다.
+- 현재 batch가 남아 있으면 캐시된 `timeline`을 우선 사용한다.
+- 현재 구현의 page serving은 path queue에서 매번 새로 합성하는 방식이 아니라, 미리 생성된 `timeline` 소비 방식이다.
 - prefetch는 primary queue 잔량 기준으로 판단한다.
 - prefetch 실패 시 현재 batch 서빙은 유지하고, 소진 시점에 재생성 또는 fallback으로 degrade 한다.
 
 ### 4.4 Bandit Principle
 
-- 최종 노출 슬롯의 Path별 배분은 `MAB`가 결정하는 것을 원칙으로 한다.
-- `MAB`는 개별 기사의 세부 순위를 다시 계산하지 않는다. path별 후보 큐가 준비된 뒤, 어떤 path에서 몇 개를 꺼낼지를 정하는 blender로 동작한다.
-- 1차 알고리즘은 `global prior + user posterior` 구조의 경량 `Hierarchical Thompson Sampling`으로 정의한다.
+- 현재 구현은 고정 mix weight 기반 병합을 사용하며, `MAB`는 아직 서빙 경로에 연결되지 않았다.
+- 현재 구현의 `BanditService`는 `fixed`/`thompson` allocator를 모두 제공한다.
+- 현재 Thompson 구현은 `global/user posterior read -> 20-slot allocation sampling -> guardrail 후처리 -> timeline materialization` 순서를 따른다.
+- posterior update는 API 요청 경로가 아니라 `recommendation_news_path_metrics_hourly` DAG가 최근 `72시간` 롤링 집계를 기준으로 Redis key를 덮어쓰는 방식으로 수행한다.
+- 장기적으로는 최종 노출 슬롯의 Path별 배분을 `MAB`가 결정하는 구조를 목표로 한다.
+- 장기 구조에서 `MAB`는 개별 기사의 세부 순위를 다시 계산하지 않는다. path별 후보 큐가 준비된 뒤, 어떤 path에서 몇 개를 꺼낼지를 정하는 blender로 동작한다.
+- 장기 구조의 1차 알고리즘은 `global prior + user posterior` 구조의 경량 `Hierarchical Thompson Sampling`으로 정의한다.
 - 각 arm은 `A1`, `A2`, `B`, `C` path이며, 각 슬롯에서 arm별 성공 확률을 sampling해 다음 path를 선택한다.
 - 여러 슬롯에서의 sequential sampling 결과가 페이지 단위 allocation을 형성한다.
 - 사람이 직접 고정하는 값은 최종 mix가 아니라 다음 항목이다.
@@ -268,10 +291,12 @@
 - 서빙 계층은 `Redis`에 저장된 user별 `alpha`, `beta`를 read-only로 조회해 sampling만 수행하고, 학습 업데이트는 배치 계층이 담당한다.
 - 배치 계층의 기본 update cadence는 `1시간`으로 둔다.
 - 초기에는 `A1/A2/B/C` 경로를 모두 MAB 대상 후보로 보되, 아래 규칙을 둔다.
+  - 현재 구현 기준 `breaking(Path B)`는 첫 page window 안에서 최소 노출을 보장한다.
   - `A2`는 행동 데이터가 충분할 때만 활성화
   - cold user는 `A1 + B` 중심
   - `A1/A2` 모두 약하면 `B`와 `C` 비중 확대
-- `A2`가 비활성화되거나 특정 path queue가 고갈되면 해당 arm은 sampling 대상에서 제외하고, 남은 arm에 guardrail을 다시 적용한다.
+- `C` 상한, 동일 종목/카테고리 반복 제한, path cap 같은 guardrail은 후속 단계에서 추가한다.
+- `A2`가 비활성화되거나 특정 path queue가 고갈되면 해당 arm은 sampling 대상에서 제외하고, 남은 arm에 guardrail을 다시 적용하는 구조를 후속 단계에서 붙인다.
 
 ### 4.5 Fallback Principle
 
