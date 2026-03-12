@@ -86,6 +86,10 @@ class RedisSessionCache(SessionCache):
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         payload = json.loads(raw)
+        payload["timeline_path_map"] = self._normalize_news_id_map(payload.get("timeline_path_map"))
+        payload["prefetched_timeline_path_map"] = self._normalize_news_id_map(
+            payload.get("prefetched_timeline_path_map")
+        )
         return RecommendationSession(**payload)
 
     def set(self, request_id: str, session: RecommendationSession, ttl_seconds: int) -> None:
@@ -94,6 +98,18 @@ class RedisSessionCache(SessionCache):
             ttl_seconds,
             json.dumps(asdict(session)),
         )
+
+    @staticmethod
+    def _normalize_news_id_map(raw_map: object) -> dict[int, str]:
+        if not isinstance(raw_map, dict):
+            return {}
+        normalized: dict[int, str] = {}
+        for key, value in raw_map.items():
+            try:
+                normalized[int(key)] = str(value)
+            except (TypeError, ValueError):
+                continue
+        return normalized
 
 
 class ResilientSessionCache(SessionCache):

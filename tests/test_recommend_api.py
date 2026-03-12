@@ -13,7 +13,7 @@ from app.services.context_builder import RecommendContextBuilder
 from app.services.bandit_service import BanditArm, BanditPosterior, BanditService, NullBanditStateStore
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
-from app.services.session_cache import InMemorySessionCache
+from app.services.session_cache import InMemorySessionCache, RedisSessionCache
 
 
 class FakeNewsRepository:
@@ -138,6 +138,18 @@ class PathBOnlyRepository(FakeNewsRepository):
         )
 
 
+class FakeRedisClient:
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    def setex(self, key: str, ttl_seconds: int, value: str) -> None:
+        del ttl_seconds
+        self._store[key] = value
+
+
 def _client_with_ids(news_ids: list[int]) -> TestClient:
     repository = FakeNewsRepository(news_ids)
     return _client_with_repository(repository)
@@ -221,6 +233,50 @@ def test_pagination_consistency_with_cursor() -> None:
     assert [item["news_id"] for item in body2["items"]] == [8, 7]
     assert [item["path"] for item in body2["items"]] == ["A1", "A1"]
     assert body2["request_id"] == body1["request_id"]
+
+
+def test_cursor_pagination_keeps_paths_with_redis_session_cache() -> None:
+    repository = FakeNewsRepository(list(range(60, 0, -1)))
+    service = RecommendService(
+        repository=repository,
+        session_cache=RedisSessionCache(FakeRedisClient()),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=50,
+            behavior_limit=50,
+            breaking_limit=30,
+            popular_limit=30,
+        ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
+    )
+
+    first = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=20, request_id="redis-1", context={})
+    )
+    assert first.next_cursor is not None
+    assert {item.path for item in first.items} == {"A1"}
+
+    second = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=20, cursor=first.next_cursor, context={})
+    )
+
+    assert len(second.items) == 20
+    assert {item.path for item in second.items} == {"A1"}
 
 
 def test_response_contains_multipath_meta_fields() -> None:
