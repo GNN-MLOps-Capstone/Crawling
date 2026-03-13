@@ -58,6 +58,7 @@ class Settings:
     breaking_stale_cutoff_minutes: int = int(
         os.getenv("RECO_BREAKING_STALE_CUTOFF_MINUTES", os.getenv("RECO_PATH_B_STALE_CUTOFF_MINUTES", "120"))
     )
+    breaking_replenish_min_count: int = int(os.getenv("RECO_BREAKING_REPLENISH_MIN_COUNT", "0"))
     popular_snapshot_max_age_minutes: int = int(os.getenv("RECO_POPULAR_SNAPSHOT_MAX_AGE_MINUTES", "180"))
     guardrail_first_page_window: int = int(os.getenv("RECO_GUARDRAIL_FIRST_PAGE_WINDOW", "10"))
     guardrail_min_breaking_in_window: int = int(os.getenv("RECO_GUARDRAIL_MIN_BREAKING_IN_WINDOW", "1"))

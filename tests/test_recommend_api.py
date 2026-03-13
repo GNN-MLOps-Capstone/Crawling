@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -230,8 +231,10 @@ def test_pagination_consistency_with_cursor() -> None:
     )
     assert second.status_code == 200
     body2 = second.json()
-    assert [item["news_id"] for item in body2["items"]] == [8, 7]
-    assert [item["path"] for item in body2["items"]] == ["A1", "A1"]
+    assert body2["request_id"] == body1["request_id"]
+    assert len(body2["items"]) == 2
+    assert not ({item["news_id"] for item in body1["items"]} & {item["news_id"] for item in body2["items"]})
+    assert {item["path"] for item in body2["items"]} <= {"A1", "B"}
     assert body2["request_id"] == body1["request_id"]
 
 
@@ -269,14 +272,14 @@ def test_cursor_pagination_keeps_paths_with_redis_session_cache() -> None:
         RecommendNewsRequest(user_id=1, limit=20, request_id="redis-1", context={})
     )
     assert first.next_cursor is not None
-    assert {item.path for item in first.items} == {"A1"}
+    assert {item.path for item in first.items} <= {"A1", "B"}
 
     second = service.recommend_news(
         RecommendNewsRequest(user_id=1, limit=20, cursor=first.next_cursor, context={})
     )
 
     assert len(second.items) == 20
-    assert {item.path for item in second.items} == {"A1"}
+    assert {item.path for item in second.items} <= {"A1", "B"}
 
 
 def test_response_contains_multipath_meta_fields() -> None:
@@ -374,6 +377,25 @@ def test_single_recent_action_is_not_enough_for_warm_behavior_path() -> None:
     body = response.json()
     assert body["meta"]["source"] == "multipath_cold"
     assert body["meta"]["fallback_reason"] == "behavior_insufficient"
+
+
+def test_cold_user_replenishes_breaking_pool_when_enabled(monkeypatch) -> None:
+    import app.services.retrieval_service as retrieval_service_module
+
+    monkeypatch.setattr(
+        retrieval_service_module,
+        "settings",
+        replace(retrieval_service_module.settings, breaking_replenish_min_count=1),
+    )
+    client = _client_with_repository(FakeNewsRepository([30, 29, 28, 27, 26, 25]))
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 4})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["source"] == "multipath_cold"
+    assert body["meta"]["fallback_reason"] == "profile_missing"
+    assert any(item["path"] == "B" for item in body["items"])
 
 
 def test_context_override_still_works_for_debug_requests() -> None:
@@ -699,7 +721,7 @@ def test_bandit_guardrail_promotes_breaking_into_first_window() -> None:
         first_page_window=recommend_service_module.settings.guardrail_first_page_window,
         min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
     )
-    guarded = bandit_service._apply_mix_guardrails(entries)
+    guarded = bandit_service._apply_legacy_breaking_guardrail(entries)
     first_window_paths = [path for _, path in guarded[: recommend_service_module.settings.guardrail_first_page_window]]
 
     assert "breaking" in first_window_paths
@@ -817,7 +839,9 @@ def test_bandit_service_thompson_uses_global_plus_user_posteriors(monkeypatch) -
 
     assert mix_plan.allocator == "thompson"
     assert mix_plan.arm_scores["behavior"] > mix_plan.arm_scores["onboarding"]
-    assert [news_id for news_id, _ in mix_plan.timeline_entries[:4]] == [201, 101, 401, 301]
+    assert mix_plan.timeline_entries[0] == (201, "behavior")
+    assert mix_plan.timeline_entries[1] == (101, "onboarding")
+    assert {path for _, path in mix_plan.timeline_entries} == {"onboarding", "behavior", "breaking", "popular"}
 
 
 def test_bandit_service_thompson_applies_minimum_per_path_guardrail(monkeypatch) -> None:

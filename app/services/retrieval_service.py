@@ -130,6 +130,18 @@ class RetrievalService:
             logger.warning("popular retrieval failed: %s", exc)
             popular_failed = True
 
+        if settings.breaking_replenish_min_count > len(breaking):
+            try:
+                onboarding, breaking = self._replenish_breaking_candidates(
+                    context=context,
+                    exclude_ids=exclude_ids,
+                    onboarding=onboarding,
+                    behavior=behavior,
+                    breaking=breaking,
+                )
+            except Exception as exc:
+                logger.warning("breaking replenish failed: %s", exc)
+
         if onboarding or behavior:
             return RetrievalResult(
                 onboarding=onboarding,
@@ -268,6 +280,57 @@ class RetrievalService:
             if (candidate.score or 0.0) >= settings.behavior_min_candidate_score
         ]
         return ranked_candidates[:limit], False
+
+    def _replenish_breaking_candidates(
+        self,
+        *,
+        context: NormalizedRecommendContext,
+        exclude_ids: set[int],
+        onboarding: list[NewsCandidate],
+        behavior: list[NewsCandidate],
+        breaking: list[NewsCandidate],
+    ) -> tuple[list[NewsCandidate], list[NewsCandidate]]:
+        target_count = min(max(settings.breaking_replenish_min_count, 0), self.breaking_limit)
+        if target_count <= len(breaking):
+            return onboarding, breaking
+        if context.has_onboarding_signals or context.has_behavior_signals:
+            return onboarding, breaking
+
+        breaking_hours = min(self.breaking_hours, self.base_pool_hours)
+        supplemental_candidates = self.repository.fetch_recent_candidates(
+            limit=self.breaking_limit,
+            hours=breaking_hours,
+            exclude_ids=exclude_ids | {item.news_id for item in behavior} | {item.news_id for item in breaking},
+            stale_cutoff_minutes=self.breaking_stale_cutoff_minutes,
+            blocked_domains=self.blocked_domains,
+        )
+
+        replenished_breaking_by_id = {item.news_id: item for item in breaking}
+        for candidate in reversed(supplemental_candidates):
+            if candidate.news_id in replenished_breaking_by_id:
+                continue
+            replenished_breaking_by_id[candidate.news_id] = candidate
+            if len(replenished_breaking_by_id) >= target_count:
+                break
+
+        if len(replenished_breaking_by_id) == len(breaking):
+            return onboarding, breaking
+
+        replenished_ids = set(replenished_breaking_by_id)
+        updated_onboarding = [
+            candidate for candidate in onboarding if candidate.news_id not in replenished_ids
+        ]
+        replenished_breaking = [
+            replenished_breaking_by_id[news_id]
+            for news_id in [item.news_id for item in breaking]
+            if news_id in replenished_breaking_by_id
+        ]
+        replenished_breaking.extend(
+            candidate
+            for candidate in supplemental_candidates
+            if candidate.news_id in replenished_ids and candidate.news_id not in {item.news_id for item in breaking}
+        )
+        return updated_onboarding, replenished_breaking[: self.breaking_limit]
 
     def _rank_candidates(
         self,
