@@ -159,6 +159,19 @@ class RetrievalService:
             )
 
         if breaking or popular:
+            if (
+                not context.has_onboarding_signals
+                and not context.has_behavior_signals
+                and not (onboarding_failed or behavior_failed or breaking_failed or popular_failed)
+            ):
+                return RetrievalResult(
+                    onboarding=[],
+                    behavior=[],
+                    breaking=breaking,
+                    popular=popular,
+                    fallback_used=False,
+                    fallback_reason=None,
+                )
             return RetrievalResult(
                 onboarding=[],
                 behavior=[],
@@ -233,7 +246,7 @@ class RetrievalService:
     ) -> list[NewsCandidate]:
         query_entities = self._build_onboarding_query_entities(context)
         if not query_entities:
-            return candidates[:limit]
+            return []
         return self._rank_candidates(
             candidates=candidates,
             query_entities=query_entities,
@@ -292,8 +305,6 @@ class RetrievalService:
     ) -> tuple[list[NewsCandidate], list[NewsCandidate]]:
         target_count = min(max(settings.breaking_replenish_min_count, 0), self.breaking_limit)
         if target_count <= len(breaking):
-            return onboarding, breaking
-        if context.has_onboarding_signals or context.has_behavior_signals:
             return onboarding, breaking
 
         breaking_hours = min(self.breaking_hours, self.base_pool_hours)

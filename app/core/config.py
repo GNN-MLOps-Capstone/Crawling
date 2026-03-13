@@ -58,7 +58,7 @@ class Settings:
     )
     prefetch_policy: str = os.getenv("RECO_PREFETCH_POLICY", "primary_replenish_first")
     breaking_stale_cutoff_minutes: int = int(
-        os.getenv("RECO_BREAKING_STALE_CUTOFF_MINUTES", os.getenv("RECO_PATH_B_STALE_CUTOFF_MINUTES", "120"))
+        os.getenv("RECO_BREAKING_STALE_CUTOFF_MINUTES", os.getenv("RECO_PATH_B_STALE_CUTOFF_MINUTES", "1440"))
     )
     breaking_replenish_min_count: int = int(os.getenv("RECO_BREAKING_REPLENISH_MIN_COUNT", "0"))
     popular_snapshot_max_age_minutes: int = int(os.getenv("RECO_POPULAR_SNAPSHOT_MAX_AGE_MINUTES", "180"))
