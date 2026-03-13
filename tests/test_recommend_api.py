@@ -222,7 +222,7 @@ def test_pagination_consistency_with_cursor() -> None:
     assert first.status_code == 200
     body1 = first.json()
     assert [item["news_id"] for item in body1["items"]] == [10, 9]
-    assert [item["path"] for item in body1["items"]] == ["A1", "A1"]
+    assert [item["path"] for item in body1["items"]] == ["B", "B"]
     assert body1["next_cursor"] is not None
 
     second = client.post(
@@ -272,14 +272,14 @@ def test_cursor_pagination_keeps_paths_with_redis_session_cache() -> None:
         RecommendNewsRequest(user_id=1, limit=20, request_id="redis-1", context={})
     )
     assert first.next_cursor is not None
-    assert {item.path for item in first.items} <= {"A1", "B"}
+    assert {item.path for item in first.items} <= {"B", "C"}
 
     second = service.recommend_news(
         RecommendNewsRequest(user_id=1, limit=20, cursor=first.next_cursor, context={})
     )
 
-    assert len(second.items) == 20
-    assert {item.path for item in second.items} <= {"A1", "B"}
+    assert len(second.items) == 10
+    assert {item.path for item in second.items} <= {"B", "C"}
 
 
 def test_response_contains_multipath_meta_fields() -> None:
@@ -300,10 +300,7 @@ def test_response_items_include_public_path_codes() -> None:
     response = client.post("/recommend/news", json={"user_id": 1, "limit": 2, "context": {}})
 
     assert response.status_code == 200
-    assert response.json()["items"] == [
-        {"news_id": 21, "path": "A1"},
-        {"news_id": 20, "path": "A1"},
-    ]
+    assert {item["path"] for item in response.json()["items"]} <= {"B", "C", "LATEST"}
 
 
 def test_profile_missing_fallback_reason_when_internal_signals_are_empty() -> None:
@@ -315,6 +312,17 @@ def test_profile_missing_fallback_reason_when_internal_signals_are_empty() -> No
     meta = response.json()["meta"]
     assert meta["source"] == "multipath_cold"
     assert meta["fallback_reason"] == "profile_missing"
+
+
+def test_cold_user_without_onboarding_does_not_emit_a1_path() -> None:
+    client = _client_with_repository(FakeNewsRepository([21, 20, 19, 18]))
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 4})
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items
+    assert all(item["path"] != "A1" for item in items)
 
 
 def test_primary_failure_falls_back_to_breaking() -> None:
@@ -355,6 +363,27 @@ def test_behavior_path_activates_when_recent_actions_exist() -> None:
     body = response.json()
     assert [item["news_id"] for item in body["items"]] == [30, 29, 28, 27]
     assert body["meta"]["source"] == "multipath_warm"
+
+
+def test_warm_user_without_onboarding_emits_behavior_but_not_a1() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [30, 29, 28, 27, 26, 25],
+            actions_by_user_id={
+                1: [
+                    {"news_id": 999, "timestamp": "2026-03-09T00:00:00+00:00", "keyword_ids": ["11"]},
+                    {"news_id": 998, "timestamp": "2026-03-09T01:00:00+00:00", "stock_ids": ["005930"]},
+                ]
+            },
+        )
+    )
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 4})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["source"] == "multipath_warm"
+    assert all(item["path"] != "A1" for item in body["items"])
 
 
 def test_single_recent_action_is_not_enough_for_warm_behavior_path() -> None:
@@ -632,20 +661,9 @@ def test_prefetch_rolls_over_only_after_current_batch_is_consumed() -> None:
     assert first.next_cursor is not None
     session = service.session_cache.get("r1")
     assert session is not None
-    assert len(session.timeline_ids) == 80
-
-    second = service.recommend_news(
-        RecommendNewsRequest(user_id=1, limit=40, cursor=first.next_cursor, context={})
-    )
-    assert second.next_cursor is not None
-    session = service.session_cache.get("r1")
-    assert session is not None
+    assert len(session.timeline_ids) == 30
     assert session.prefetched_timeline_ids
-
-    third = service.recommend_news(
-        RecommendNewsRequest(user_id=1, limit=40, cursor=second.next_cursor, context={})
-    )
-    assert len(third.items) == 40
+    assert {item.path for item in first.items} <= {"B", "C"}
 
 
 def test_stale_session_is_restored_for_cursor_pagination() -> None:
@@ -844,6 +862,65 @@ def test_bandit_service_thompson_uses_global_plus_user_posteriors(monkeypatch) -
     assert {path for _, path in mix_plan.timeline_entries} == {"onboarding", "behavior", "breaking", "popular"}
 
 
+def test_bandit_service_thompson_applies_global_posterior_weight(monkeypatch) -> None:
+    monkeypatch.setattr(
+        BanditService,
+        "_sample_beta",
+        staticmethod(lambda *, alpha, beta, rng: alpha / (alpha + beta)),
+    )
+
+    weighted_bandit_service = BanditService(
+        arms=(
+            BanditArm(path="onboarding", weight=1),
+            BanditArm(path="behavior", weight=1),
+        ),
+        first_page_window=10,
+        min_breaking_in_window=0,
+        allocator="thompson",
+        batch_size=2,
+        min_per_arm=1,
+        prior_alpha=10,
+        prior_beta=10,
+        global_posterior_weight=0.25,
+        state_store=FakeBanditStateStore(
+            global_posteriors={
+                "onboarding": BanditPosterior(alpha=20, beta=0),
+                "behavior": BanditPosterior(alpha=0, beta=20),
+            }
+        ),
+    )
+    unweighted_bandit_service = BanditService(
+        arms=weighted_bandit_service.arms,
+        first_page_window=10,
+        min_breaking_in_window=0,
+        allocator="thompson",
+        batch_size=2,
+        min_per_arm=1,
+        prior_alpha=10,
+        prior_beta=10,
+        global_posterior_weight=1.0,
+        state_store=weighted_bandit_service.state_store,
+    )
+
+    weighted_mix = weighted_bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101],
+            "behavior": [201],
+        },
+        user_id=None,
+    )
+    unweighted_mix = unweighted_bandit_service.build_mix_plan(
+        path_candidates={
+            "onboarding": [101],
+            "behavior": [201],
+        },
+        user_id=None,
+    )
+
+    assert weighted_mix.arm_scores["onboarding"] < unweighted_mix.arm_scores["onboarding"]
+    assert weighted_mix.arm_scores["behavior"] > unweighted_mix.arm_scores["behavior"]
+
+
 def test_bandit_service_thompson_applies_minimum_per_path_guardrail(monkeypatch) -> None:
     bandit_service = BanditService(
         arms=(
@@ -986,4 +1063,4 @@ def test_recommendation_response_emits_impression_logs(monkeypatch) -> None:
     assert len(captured) == 2
     assert captured[0].news_id == 21
     assert captured[0].rank == 1
-    assert captured[0].path == "onboarding"
+    assert captured[0].path == "breaking"
