@@ -162,6 +162,72 @@ SELECT
 FROM user_path_totals upt
 """
 
+UPSERT_GLOBAL_BANDIT_STATE_SQL = """
+INSERT INTO public.recommendation_bandit_state (
+    scope,
+    user_id,
+    path,
+    alpha,
+    beta,
+    reward_count,
+    impression_count,
+    window_end,
+    updated_at
+)
+VALUES (
+    %(scope)s,
+    %(user_id)s,
+    %(path)s,
+    %(alpha)s,
+    %(beta)s,
+    %(reward_count)s,
+    %(impression_count)s,
+    %(window_end)s::timestamptz,
+    NOW()
+)
+ON CONFLICT (path) WHERE scope = 'global'
+DO UPDATE SET
+    alpha = EXCLUDED.alpha,
+    beta = EXCLUDED.beta,
+    reward_count = EXCLUDED.reward_count,
+    impression_count = EXCLUDED.impression_count,
+    window_end = EXCLUDED.window_end,
+    updated_at = NOW()
+"""
+
+UPSERT_USER_BANDIT_STATE_SQL = """
+INSERT INTO public.recommendation_bandit_state (
+    scope,
+    user_id,
+    path,
+    alpha,
+    beta,
+    reward_count,
+    impression_count,
+    window_end,
+    updated_at
+)
+VALUES (
+    %(scope)s,
+    %(user_id)s,
+    %(path)s,
+    %(alpha)s,
+    %(beta)s,
+    %(reward_count)s,
+    %(impression_count)s,
+    %(window_end)s::timestamptz,
+    NOW()
+)
+ON CONFLICT (user_id, path) WHERE scope = 'user'
+DO UPDATE SET
+    alpha = EXCLUDED.alpha,
+    beta = EXCLUDED.beta,
+    reward_count = EXCLUDED.reward_count,
+    impression_count = EXCLUDED.impression_count,
+    window_end = EXCLUDED.window_end,
+    updated_at = NOW()
+"""
+
 
 def build_bandit_state_key(*, key_prefix: str, scope: str, path: str, user_id: int | None = None) -> str:
     if scope == "global":
@@ -250,32 +316,14 @@ def rows_to_user_posteriors(
 def update_bandit_posteriors(
     *,
     postgres_conn_id: str,
-    redis_host: str,
-    redis_port: int,
-    redis_password: str | None,
-    key_prefix: str,
     window_end: str,
     lookback_hours: int,
     dwell_threshold_seconds: int,
 ) -> dict[str, int]:
     from airflow.providers.postgres.hooks.postgres import PostgresHook
 
-    try:
-        import redis
-    except ImportError as exc:
-        raise RuntimeError("redis package is required for bandit posterior update task") from exc
-
     window_start = _compute_window_start(window_end=window_end, lookback_hours=lookback_hours)
     postgres = PostgresHook(postgres_conn_id=postgres_conn_id)
-    redis_client = redis.Redis(
-        host=redis_host,
-        port=redis_port,
-        password=redis_password,
-        decode_responses=False,
-        socket_connect_timeout=1.0,
-        socket_timeout=1.0,
-    )
-    redis_client.ping()
 
     query_params = {
         "window_end": window_end,
@@ -296,19 +344,43 @@ def update_bandit_posteriors(
         window_end=window_end,
     )
 
-    with redis_client.pipeline(transaction=False) as pipe:
-        for record in [*global_records, *user_records]:
-            key = build_bandit_state_key(
-                key_prefix=key_prefix,
-                scope=record.scope,
-                path=record.path,
-                user_id=record.user_id,
-            )
-            pipe.set(key, build_bandit_state_payload(record))
-        pipe.execute()
+    global_upsert_rows = [
+        {
+            "scope": record.scope,
+            "user_id": record.user_id,
+            "path": record.path,
+            "alpha": record.alpha,
+            "beta": record.beta,
+            "reward_count": record.reward_count,
+            "impression_count": record.impression_count,
+            "window_end": record.window_end,
+        }
+        for record in global_records
+    ]
+    user_upsert_rows = [
+        {
+            "scope": record.scope,
+            "user_id": record.user_id,
+            "path": record.path,
+            "alpha": record.alpha,
+            "beta": record.beta,
+            "reward_count": record.reward_count,
+            "impression_count": record.impression_count,
+            "window_end": record.window_end,
+        }
+        for record in user_records
+    ]
+    if global_upsert_rows or user_upsert_rows:
+        with postgres.get_conn() as conn:
+            with conn.cursor() as cur:
+                if global_upsert_rows:
+                    cur.executemany(UPSERT_GLOBAL_BANDIT_STATE_SQL, global_upsert_rows)
+                if user_upsert_rows:
+                    cur.executemany(UPSERT_USER_BANDIT_STATE_SQL, user_upsert_rows)
+            conn.commit()
 
     logger.info(
-        "bandit posterior update completed window_start=%s window_end=%s global=%s user=%s",
+        "bandit posterior update completed to_db window_start=%s window_end=%s global=%s user=%s",
         window_start,
         window_end,
         len(global_records),

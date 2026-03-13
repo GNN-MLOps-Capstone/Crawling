@@ -10,7 +10,7 @@ from app.schemas.recommend import (
 )
 from app.services.context_builder import RecommendContextBuilder
 from app.services.cursor_service import CursorError
-from app.services.bandit_service import BanditArm, BanditService, build_bandit_state_store
+from app.services.bandit_service import BanditArm, BanditService, build_bandit_db_state_store
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import build_session_cache
@@ -21,12 +21,7 @@ _session_cache = build_session_cache(
     port=settings.redis_port,
     password=settings.redis_password,
 )
-_bandit_state_store = build_bandit_state_store(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    password=settings.redis_password,
-    key_prefix=settings.bandit_state_key_prefix,
-)
+_bandit_state_store = build_bandit_db_state_store()
 
 
 def get_recommend_service() -> RecommendService:

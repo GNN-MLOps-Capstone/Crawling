@@ -63,10 +63,6 @@ with DAG(
         window_end = dag_conf.get("window_end") or data_interval_end.to_iso8601_string()
         return update_bandit_posteriors(
             postgres_conn_id="news_data_db",
-            redis_host=os.getenv("REDIS_HOST", "redis"),
-            redis_port=int(os.getenv("REDIS_PORT", "6379")),
-            redis_password=os.getenv("REDIS_PASSWORD"),
-            key_prefix=os.getenv("RECO_BANDIT_STATE_KEY_PREFIX", "recommend:bandit"),
             window_end=window_end,
             lookback_hours=int(os.getenv("RECO_BANDIT_LOOKBACK_HOURS", "72")),
             dwell_threshold_seconds=int(os.getenv("RECO_VALID_READ_DWELL_SECONDS", "5")),

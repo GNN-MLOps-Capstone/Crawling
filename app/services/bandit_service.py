@@ -5,6 +5,8 @@ import logging
 import random
 from dataclasses import dataclass, field
 
+from app.repositories.bandit_state_repository import BanditStateRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,6 +85,25 @@ class RedisBanditStateStore(BanditStateStore):
         return BanditPosterior(alpha=alpha, beta=beta)
 
 
+class DbBanditStateStore(BanditStateStore):
+    def __init__(self, repository: BanditStateRepository) -> None:
+        self._repository = repository
+
+    def get_global_posteriors(self, *, paths: list[str]) -> dict[str, BanditPosterior]:
+        rows = self._repository.fetch_global_posteriors(paths=paths)
+        return {
+            path: BanditPosterior(alpha=row.alpha, beta=row.beta)
+            for path, row in rows.items()
+        }
+
+    def get_user_posteriors(self, *, user_id: int, paths: list[str]) -> dict[str, BanditPosterior]:
+        rows = self._repository.fetch_user_posteriors(user_id=user_id, paths=paths)
+        return {
+            path: BanditPosterior(alpha=row.alpha, beta=row.beta)
+            for path, row in rows.items()
+        }
+
+
 def build_bandit_state_store(
     *,
     host: str,
@@ -107,6 +128,14 @@ def build_bandit_state_store(
         return NullBanditStateStore()
 
     return RedisBanditStateStore(client, key_prefix=key_prefix)
+
+
+def build_bandit_db_state_store() -> BanditStateStore:
+    try:
+        return DbBanditStateStore(BanditStateRepository())
+    except Exception as exc:
+        logger.warning("bandit db state store falling back to null backend: %s", exc)
+        return NullBanditStateStore()
 
 
 @dataclass(frozen=True)
