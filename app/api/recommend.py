@@ -62,6 +62,8 @@ def get_recommend_service() -> RecommendService:
             min_per_arm=settings.bandit_min_items_per_path,
             prior_alpha=settings.bandit_prior_alpha,
             prior_beta=settings.bandit_prior_beta,
+            global_posterior_weight=settings.bandit_global_posterior_weight,
+            user_posterior_weight=settings.bandit_user_posterior_weight,
             state_store=_bandit_state_store,
         ),
     )

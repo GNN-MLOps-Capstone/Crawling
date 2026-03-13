@@ -119,6 +119,8 @@ class BanditService:
     min_per_arm: int = 2
     prior_alpha: float = 2.0
     prior_beta: float = 2.0
+    global_posterior_weight: float = 1.0
+    user_posterior_weight: float = 1.0
     state_store: BanditStateStore = field(default_factory=NullBanditStateStore)
     random_seed: int | None = None
 
@@ -270,8 +272,16 @@ class BanditService:
         for path in paths:
             global_posterior = global_posteriors.get(path, BanditPosterior())
             user_posterior = user_posteriors.get(path, BanditPosterior())
-            alpha = self.prior_alpha + global_posterior.alpha + user_posterior.alpha
-            beta = self.prior_beta + global_posterior.beta + user_posterior.beta
+            alpha = (
+                self.prior_alpha
+                + (global_posterior.alpha * self.global_posterior_weight)
+                + (user_posterior.alpha * self.user_posterior_weight)
+            )
+            beta = (
+                self.prior_beta
+                + (global_posterior.beta * self.global_posterior_weight)
+                + (user_posterior.beta * self.user_posterior_weight)
+            )
             scores[path] = self._sample_beta(alpha=alpha, beta=beta, rng=rng)
         return scores
 

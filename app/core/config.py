@@ -48,8 +48,10 @@ class Settings:
     bandit_allocator: str = os.getenv("RECO_BANDIT_ALLOCATOR", "fixed")
     bandit_batch_size: int = int(os.getenv("RECO_BANDIT_BATCH_SIZE", "20"))
     bandit_min_items_per_path: int = int(os.getenv("RECO_BANDIT_MIN_ITEMS_PER_PATH", "2"))
-    bandit_prior_alpha: float = float(os.getenv("RECO_BANDIT_PRIOR_ALPHA", "2"))
-    bandit_prior_beta: float = float(os.getenv("RECO_BANDIT_PRIOR_BETA", "2"))
+    bandit_prior_alpha: float = float(os.getenv("RECO_BANDIT_PRIOR_ALPHA", "1"))
+    bandit_prior_beta: float = float(os.getenv("RECO_BANDIT_PRIOR_BETA", "199"))
+    bandit_global_posterior_weight: float = float(os.getenv("RECO_BANDIT_GLOBAL_POSTERIOR_WEIGHT", "0.05"))
+    bandit_user_posterior_weight: float = float(os.getenv("RECO_BANDIT_USER_POSTERIOR_WEIGHT", "1.0"))
     bandit_state_key_prefix: str = os.getenv("RECO_BANDIT_STATE_KEY_PREFIX", "recommend:bandit")
     prefetch_primary_low_watermark: int = int(
         os.getenv("RECO_PREFETCH_PRIMARY_LOW_WATERMARK", os.getenv("RECO_PREFETCH_PATH_A_LOW_WATERMARK", "20"))
