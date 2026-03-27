@@ -10,39 +10,41 @@ import torch_geometric.transforms as T
 from torch_geometric.transforms import RandomLinkSplit
 from collections import defaultdict
 
+
 # -----------------------------------------------------------
 # 1. 노드 필터링 함수 (키워드/주식용) 
 # -----------------------------------------------------------
 def filter_low_frequency_nodes(data, node_type, edge_type, rev_edge_type, min_freq=3):
     print(f"🧹 Filtering {node_type} with frequency < {min_freq}...", flush=True)
-    
+
     edge_index = data[edge_type].edge_index
     num_nodes = data[node_type].num_nodes
-    
+
     # Degree 계산 & 마스크 생성
     degrees = torch.bincount(edge_index[1], minlength=num_nodes)
     mask = degrees >= min_freq
     valid_indices = mask.nonzero(as_tuple=False).view(-1)
-    
-    print(f"   [{node_type}] Before: {num_nodes} -> After: {valid_indices.numel()} (Removed {num_nodes - valid_indices.numel()})")
+
+    print(
+        f"   [{node_type}] Before: {num_nodes} -> After: {valid_indices.numel()} (Removed {num_nodes - valid_indices.numel()})")
 
     # 매핑 테이블 생성 (Old -> New)
     mapping = torch.full((num_nodes,), -1, dtype=torch.long)
     mapping[valid_indices] = torch.arange(valid_indices.numel())
 
     if valid_indices.numel() == num_nodes:
-        return data, mapping 
+        return data, mapping
 
-    # Feature 필터링
+        # Feature 필터링
     if data[node_type].x is not None:
         data[node_type].x = data[node_type].x[mask]
-        
+
     # Edge 업데이트 (Forward: News -> Target)
     edge_mask = mask[edge_index[1]]
     new_edge_index = edge_index[:, edge_mask]
     new_edge_index[1] = mapping[new_edge_index[1]]
     data[edge_type].edge_index = new_edge_index
-    
+
     # Edge 업데이트 (Backward: Target -> News)
     if rev_edge_type in data.edge_index_dict:
         rev_edge_index = data[rev_edge_type].edge_index
@@ -53,47 +55,49 @@ def filter_low_frequency_nodes(data, node_type, edge_type, rev_edge_type, min_fr
 
     # 노드 개수 업데이트
     data[node_type].num_nodes = valid_indices.numel()
-    
+
     return data, mapping
+
 
 # -----------------------------------------------------------
 # 2. 고립된 뉴스 노드 삭제 함수
 # -----------------------------------------------------------
 def remove_isolated_news(data):
     print("🧹 Removing isolated news nodes...", flush=True)
-    
+
     num_news = data['news'].num_nodes
     connected_news_mask = torch.zeros(num_news, dtype=torch.bool)
-    
+
     for edge_type in [('news', 'has_keyword', 'keyword'), ('news', 'has_stock', 'stock')]:
         if edge_type in data.edge_index_dict:
             src, _ = data[edge_type].edge_index
             connected_news_mask[src] = True
-            
+
     valid_news_indices = connected_news_mask.nonzero(as_tuple=False).view(-1)
-    
-    print(f"   [News] Before: {num_news} -> After: {valid_news_indices.numel()} (Removed {num_news - valid_news_indices.numel()})")
-    
+
+    print(
+        f"   [News] Before: {num_news} -> After: {valid_news_indices.numel()} (Removed {num_news - valid_news_indices.numel()})")
+
     if valid_news_indices.numel() == num_news:
         return data
 
     news_mapping = torch.full((num_news,), -1, dtype=torch.long)
     news_mapping[valid_news_indices] = torch.arange(valid_news_indices.numel())
-    
+
     if data['news'].x is not None:
         data['news'].x = data['news'].x[connected_news_mask]
-        
+
     for edge_type in list(data.edge_index_dict.keys()):
         src_type, rel, dst_type = edge_type
         edge_index = data[edge_type].edge_index
-        
+
         if src_type == 'news':
             src, dst = edge_index
             valid_mask = news_mapping[src] != -1
             new_src = news_mapping[src[valid_mask]]
             new_dst = dst[valid_mask]
             data[edge_type].edge_index = torch.stack([new_src, new_dst], dim=0)
-            
+
         elif dst_type == 'news':
             src, dst = edge_index
             valid_mask = news_mapping[dst] != -1
@@ -102,86 +106,88 @@ def remove_isolated_news(data):
             data[edge_type].edge_index = torch.stack([new_src, new_dst], dim=0)
 
     data['news'].num_nodes = valid_news_indices.numel()
-    
+
     return data
+
 
 # -----------------------------------------------------------
 # 3. PMI Edge 생성 함수
 # -----------------------------------------------------------
 def add_pmi_global_edges(data, min_pmi=0.1, min_cooccur=3):
     print(f"🔗 Building Global PMI Edges (Threshold > {min_pmi})...", flush=True)
-    
+
     news_key_edge = data['news', 'has_keyword', 'keyword'].edge_index
     news_stock_edge = data['news', 'has_stock', 'stock'].edge_index
     num_news = data['news'].num_nodes
-    
+
     news_to_keys = defaultdict(list)
     news_to_stocks = defaultdict(list)
-    
+
     key_freq = defaultdict(int)
     stock_freq = defaultdict(int)
-    
+
     for i in range(news_key_edge.size(1)):
         n_id, k_id = news_key_edge[:, i].tolist()
         news_to_keys[n_id].append(k_id)
-    
+
     for i in range(news_stock_edge.size(1)):
         n_id, s_id = news_stock_edge[:, i].tolist()
         news_to_stocks[n_id].append(s_id)
-    
+
     for k_list in news_to_keys.values():
         for k in set(k_list): key_freq[k] += 1
-            
+
     for s_list in news_to_stocks.values():
         for s in set(s_list): stock_freq[s] += 1
-        
+
     cooccur_counts = defaultdict(int)
     common_news = set(news_to_keys.keys()) & set(news_to_stocks.keys())
-    
+
     for n_id in common_news:
-        keys = set(news_to_keys[n_id]) 
+        keys = set(news_to_keys[n_id])
         stocks = set(news_to_stocks[n_id])
         for k in keys:
             for s in stocks:
                 cooccur_counts[(k, s)] += 1
-                
+
     src_list = []
     dst_list = []
     count = 0
     eps = 1e-8
-    
+
     for (k, s), joint_freq in cooccur_counts.items():
         if joint_freq < min_cooccur:
             continue
-            
+
         freq_k = key_freq[k]
         freq_s = stock_freq[s]
         pmi_score = math.log((joint_freq * num_news) / (freq_k * freq_s + eps))
-        
+
         if pmi_score > min_pmi:
             src_list.append(k)
             dst_list.append(s)
             count += 1
-            
+
     print(f"   - Created {count} PMI-based edges (Min Co-occur: {min_cooccur}, Min PMI: {min_pmi})")
-    
+
     if count > 0:
         edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
         data['keyword', 'globally_related', 'stock'].edge_index = edge_index
         data['stock', 'rev_globally_related', 'keyword'].edge_index = torch.stack([edge_index[1], edge_index[0]])
-        
+
     return data, count
+
 
 # -----------------------------------------------------------
 # 4. 메인 로드 함수 (수정됨)
 # -----------------------------------------------------------
-def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추가
+def load_data_from_s3(path, aws_info, config=None):  # [변경] config 인자 추가
     print(f"📂 [DataLoader] Fetching from: silver/{path}", flush=True)
 
     # Config에서 파라미터 추출 (기본값 설정)
     if config is None: config = {}
     data_conf = config.get('data_processing', {})
-    
+
     min_freq_keyword = data_conf.get('min_freq_keyword', 7)
     min_freq_stock = data_conf.get('min_freq_stock', 5)
     min_pmi = data_conf.get('min_pmi', 0.1)
@@ -195,28 +201,28 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
 
     with fs.open(f"silver/{path}", 'rb') as f:
         data = torch.load(f, weights_only=False)
-    
+
     # 1. 키워드 & 주식 필터링 (Config 값 사용)
     data, keyword_mapping = filter_low_frequency_nodes(
-        data, 'keyword', 
-        ('news', 'has_keyword', 'keyword'), 
-        ('keyword', 'rev_has_keyword', 'news'), 
+        data, 'keyword',
+        ('news', 'has_keyword', 'keyword'),
+        ('keyword', 'rev_has_keyword', 'news'),
         min_freq=min_freq_keyword
     )
-    
+
     data, stock_mapping = filter_low_frequency_nodes(
-        data, 'stock', 
-        ('news', 'has_stock', 'stock'), 
-        ('stock', 'rev_has_stock', 'news'), 
+        data, 'stock',
+        ('news', 'has_stock', 'stock'),
+        ('stock', 'rev_has_stock', 'news'),
         min_freq=min_freq_stock
     )
-    
+
     # 2. 고립된 뉴스 삭제
     data = remove_isolated_news(data)
-    
+
     # 3. PMI Edge 추가 (Config 값 사용)
     data, _ = add_pmi_global_edges(data, min_pmi=min_pmi, min_cooccur=min_cooccur)
-    
+
     print("🔄 [DataLoader] Applying ToUndirected (Global)...", flush=True)
     data = T.ToUndirected()(data)
 
@@ -224,13 +230,13 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
     mapping_path = path.replace("hetero_graph.pt", "node_mapping.pkl")
     name_to_idx_map = {}
     serving_mapping = {}
-    
+
     try:
         full_map_path = f"silver/{mapping_path}"
         if fs.exists(full_map_path):
             with fs.open(full_map_path, 'rb') as f:
                 full_mappings = pickle.load(f)
-            
+
             if 'news' in full_mappings:
                 serving_mapping['news'] = full_mappings['news']
 
@@ -241,7 +247,7 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
                     meta_map = full_mappings[entity_type].get('meta', {})
                     filtered_id_to_idx = {}
                     filtered_meta = {}
-                    
+
                     for real_id, old_idx in original_map.items():
                         if old_idx < len(mapping_tensor):
                             new_idx = mapping_tensor[old_idx].item()
@@ -255,13 +261,13 @@ def load_data_from_s3(path, aws_info, config=None): # [변경] config 인자 추
                         'id_to_idx': filtered_id_to_idx,
                         'meta': filtered_meta,
                     }
-                    
+
                     print(f"   - Updated {entity_type} map size: {len(name_to_idx_map[entity_type])}")
 
         else:
             name_to_idx_map = None
             serving_mapping = None
-            
+
     except Exception as e:
         print(f"⚠️ Mapping load failed: {e}")
         name_to_idx_map = None
@@ -353,16 +359,89 @@ def _build_edge_labels(pos_edge_index, full_positive_edge_index, num_src, num_ds
     return edge_label_index, edge_label
 
 
+def _build_relation_pairs(news_keyword_edge, news_stock_edge, min_strength=1):
+    news_to_keywords = defaultdict(set)
+    news_to_stocks = defaultdict(set)
+
+    if news_keyword_edge is not None and news_keyword_edge.numel() > 0:
+        for news_idx, keyword_idx in news_keyword_edge.t().tolist():
+            news_to_keywords[int(news_idx)].add(int(keyword_idx))
+
+    if news_stock_edge is not None and news_stock_edge.numel() > 0:
+        for news_idx, stock_idx in news_stock_edge.t().tolist():
+            news_to_stocks[int(news_idx)].add(int(stock_idx))
+
+    counts = {
+        'key2stock': defaultdict(int),
+        'stock2stock': defaultdict(int),
+        'key2key': defaultdict(int),
+    }
+
+    for news_idx in set(news_to_keywords.keys()) | set(news_to_stocks.keys()):
+        keywords = sorted(news_to_keywords.get(news_idx, set()))
+        stocks = sorted(news_to_stocks.get(news_idx, set()))
+
+        for keyword_idx in keywords:
+            for stock_idx in stocks:
+                counts['key2stock'][(keyword_idx, stock_idx)] += 1
+
+        for i, src_idx in enumerate(keywords):
+            for j, dst_idx in enumerate(keywords):
+                if i == j:
+                    continue
+                counts['key2key'][(src_idx, dst_idx)] += 1
+
+        for i, src_idx in enumerate(stocks):
+            for j, dst_idx in enumerate(stocks):
+                if i == j:
+                    continue
+                counts['stock2stock'][(src_idx, dst_idx)] += 1
+
+    relation_pairs = {}
+    for relation_name, pair_counts in counts.items():
+        filtered_pairs = [(src, dst, strength) for (src, dst), strength in pair_counts.items() if
+                          strength >= int(min_strength)]
+        if filtered_pairs:
+            src_list = [src for src, _, _ in filtered_pairs]
+            dst_list = [dst for _, dst, _ in filtered_pairs]
+            strengths = [strength for _, _, strength in filtered_pairs]
+            relation_pairs[relation_name] = (
+                torch.tensor([src_list, dst_list], dtype=torch.long),
+                torch.tensor(strengths, dtype=torch.float),
+            )
+        else:
+            relation_pairs[relation_name] = (
+                torch.empty((2, 0), dtype=torch.long),
+                torch.empty((0,), dtype=torch.float),
+            )
+
+    return relation_pairs
+
+
+def _attach_relation_labels(split_data, relation_pairs):
+    relation_specs = (
+        ('keyword', 'key2stock'),
+        ('stock', 'stock2stock'),
+        ('keyword', 'key2key'),
+    )
+    for source_type, relation_name in relation_specs:
+        edge_index, strength = relation_pairs[relation_name]
+        split_data[source_type][f'{relation_name}_index'] = edge_index
+        split_data[source_type][f'{relation_name}_strength'] = strength
+    return split_data
+
+
 def temporal_link_split(
-    data,
-    val_ratio=0.1,
-    test_ratio=0.1,
-    split_policy="date",
-    train_end_date=None,
-    val_end_date=None,
-    negative_ratio=1.0,
-    seed=42,
-    temporal_message_passing="full_graph",
+        data,
+        val_ratio=0.1,
+        test_ratio=0.1,
+        split_policy="date",
+        train_end_date=None,
+        val_end_date=None,
+        negative_ratio=1.0,
+        seed=42,
+        temporal_message_passing="full_graph",
+        relation_min_cooccur=1,
 ):
     print("✂️ [DataLoader] Temporal Splitting Dataset...", flush=True)
 
@@ -447,15 +526,49 @@ def temporal_link_split(
 
         train_data[et].edge_label_index = train_edge_label_index
         train_data[et].edge_label = train_edge_label
+        train_data[et].relation_edge_index = train_pos
+        train_data[et].online_update_edge_index = train_pos
         val_data[et].edge_label_index = val_edge_label_index
         val_data[et].edge_label = val_edge_label
+        val_data[et].relation_edge_index = val_pos
+        val_data[et].online_update_edge_index = torch.cat([train_pos, val_pos], dim=1)
         test_data[et].edge_label_index = test_edge_label_index
         test_data[et].edge_label = test_edge_label
+        test_data[et].relation_edge_index = test_pos
+        test_data[et].online_update_edge_index = full_edge_index
 
         print(
             f"   [{et}] train/val/test positives = "
             f"{train_pos.size(1)}/{val_pos.size(1)}/{test_pos.size(1)}",
             flush=True
+        )
+
+    train_relations = _build_relation_pairs(
+        train_data[('news', 'has_keyword', 'keyword')].relation_edge_index,
+        train_data[('news', 'has_stock', 'stock')].relation_edge_index,
+        min_strength=relation_min_cooccur,
+    )
+    val_relations = _build_relation_pairs(
+        val_data[('news', 'has_keyword', 'keyword')].relation_edge_index,
+        val_data[('news', 'has_stock', 'stock')].relation_edge_index,
+        min_strength=relation_min_cooccur,
+    )
+    test_relations = _build_relation_pairs(
+        test_data[('news', 'has_keyword', 'keyword')].relation_edge_index,
+        test_data[('news', 'has_stock', 'stock')].relation_edge_index,
+        min_strength=relation_min_cooccur,
+    )
+
+    train_data = _attach_relation_labels(train_data, train_relations)
+    val_data = _attach_relation_labels(val_data, val_relations)
+    test_data = _attach_relation_labels(test_data, test_relations)
+
+    for relation_name, (edge_index, _) in train_relations.items():
+        val_count = int(val_relations[relation_name][0].size(1))
+        test_count = int(test_relations[relation_name][0].size(1))
+        print(
+            f"   [relation:{relation_name}] train/val/test = {int(edge_index.size(1))}/{val_count}/{test_count}",
+            flush=True,
         )
 
     return (train_data, val_data, test_data), target_edge_types
@@ -483,6 +596,7 @@ def preprocess_data(data, val_ratio=0.1, test_ratio=0.1, config=None):
             negative_ratio=training_conf.get('negative_ratio', 1.0),
             seed=training_conf.get('seed', 42),
             temporal_message_passing=training_conf.get('temporal_message_passing', 'full_graph'),
+            relation_min_cooccur=training_conf.get('relation_min_cooccur', 1),
         )
 
     target_edge_types = [('news', 'has_keyword', 'keyword'), ('news', 'has_stock', 'stock')]

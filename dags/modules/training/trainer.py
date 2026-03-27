@@ -14,7 +14,94 @@ from modules.training.models import Model
 from modules.training.data_loader import load_data_from_s3, preprocess_data
 from modules.training.engine import train_one_epoch, evaluate, evaluate_golden_set
 from modules.training.utils import load_json_file, log_file_artifact, build_gold_similarity_report
-from modules.training.utils import set_seed 
+from modules.training.utils import set_seed
+
+REV_EDGE_TYPE_MAP = {
+    ('news', 'has_keyword', 'keyword'): ('keyword', 'rev_has_keyword', 'news'),
+    ('news', 'has_stock', 'stock'): ('stock', 'rev_has_stock', 'news'),
+}
+
+RELATION_STORE_SPECS = {
+    'key2stock': 'keyword',
+    'stock2stock': 'stock',
+    'key2key': 'keyword',
+}
+
+
+def _build_relation_ground_truth_edge_index_dict(data, target_edge_types):
+    return {et: getattr(data[et], 'relation_edge_index', data[et].edge_index) for et in target_edge_types}
+
+
+def _build_message_passing_edge_index_dict(data, target_edge_types, use_online_update=False):
+    edge_index_dict = dict(data.edge_index_dict)
+    if not use_online_update:
+        return edge_index_dict
+
+    for et in target_edge_types:
+        online_edge_index = getattr(data[et], 'online_update_edge_index', None)
+        if online_edge_index is None:
+            continue
+        edge_index_dict[et] = online_edge_index
+        rev_et = REV_EDGE_TYPE_MAP.get(et)
+        if rev_et is not None:
+            edge_index_dict[rev_et] = torch.stack([online_edge_index[1], online_edge_index[0]], dim=0)
+    return edge_index_dict
+
+
+def _compute_update_delta_metrics(before_metrics, after_metrics, before_prefix, after_prefix, delta_prefix, eval_k):
+    suffixes = [
+        'final_score',
+        'key2stock_mrr',
+        'key2key_mrr',
+        'stock2stock_mrr',
+        f'key2stock_hit_at_{eval_k}',
+        f'key2key_hit_at_{eval_k}',
+        f'stock2stock_hit_at_{eval_k}',
+        f'key2stock_recall_at_{eval_k}',
+        f'key2key_recall_at_{eval_k}',
+        f'stock2stock_recall_at_{eval_k}',
+        f'key2stock_map_at_{eval_k}',
+        f'key2key_map_at_{eval_k}',
+        f'stock2stock_map_at_{eval_k}',
+    ]
+    delta_metrics = {}
+    for suffix in suffixes:
+        before_key = f'{before_prefix}_{suffix}'
+        after_key = f'{after_prefix}_{suffix}'
+        if before_key in before_metrics and after_key in after_metrics:
+            delta_metrics[f'{delta_prefix}_{suffix}'] = float(after_metrics[after_key] - before_metrics[before_key])
+    return delta_metrics
+
+
+def _extract_relation_store(data, relation_loss_types=None):
+    allowed = set(relation_loss_types) if relation_loss_types else set(RELATION_STORE_SPECS.keys())
+    relation_store = {}
+    for relation_name, source_type in RELATION_STORE_SPECS.items():
+        if relation_name not in allowed:
+            continue
+        index_attr = f'{relation_name}_index'
+        strength_attr = f'{relation_name}_strength'
+        node_store = data[source_type]
+        if index_attr not in node_store or strength_attr not in node_store:
+            continue
+        relation_store[relation_name] = {
+            'edge_index': node_store[index_attr].detach().cpu(),
+            'strength': node_store[strength_attr].detach().cpu(),
+        }
+    return relation_store
+
+
+def _strip_relation_store(data):
+    for relation_name, source_type in RELATION_STORE_SPECS.items():
+        index_attr = f'{relation_name}_index'
+        strength_attr = f'{relation_name}_strength'
+        node_store = data[source_type]
+        if index_attr in node_store:
+            del node_store[index_attr]
+        if strength_attr in node_store:
+            del node_store[strength_attr]
+    return data
+
 
 def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data_cache=None, gate_threshold=0.25):
     """
@@ -46,7 +133,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                 m2 = re.search(r"(\d{4}-\d{2}-\d{2})", str(trainset_path))
                 if m2:
                     train_date = m2.group(1)
-        
+
         # 1. 데이터 로드 (캐시가 있으면 사용, 없으면 로드)
         if raw_data_cache:
             if len(raw_data_cache) == 4:
@@ -70,7 +157,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
         # 4. 모델 설정
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         # [변경] Model 초기화 시 config 전체 전달
         model = Model(
             hidden_dim=config['model']['hidden_dim'],
@@ -78,13 +165,17 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             news_feat_dim=raw_data['news'].x.shape[1],
             keyword_feat_dim=raw_data['keyword'].x.shape[1],
             stock_feat_dim=raw_data['stock'].x.shape[1],
-            config=config # <--- 추가됨
+            config=config  # <--- 추가됨
         ).to(device)
 
         optimizer = Adam(model.parameters(), lr=config['training']['lr'])
         # Criterion은 InfoNCE 내부에서 계산하므로 외부 선언 불필요 (engine.py 참조)
 
-        train_data = train_data.to(device)
+        train_data_cpu = train_data
+        relation_loss_types = config['training'].get('relation_loss_types', ['key2stock'])
+        train_relation_store = _extract_relation_store(train_data_cpu, relation_loss_types)
+        train_data_cpu = _strip_relation_store(train_data_cpu)
+        train_data = train_data_cpu.to(device)
 
         # 5. MLflow Experiment 설정
         mlflow_conf = config.get('mlflow', {})
@@ -93,14 +184,14 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
         with mlflow.start_run() as run:
             # Artifact 저장 (Golden Set 추적용)
             log_file_artifact('golden_cases.json')
-            
+
             # 파라미터 로깅
             mlflow.log_params(config['model'])
             mlflow.log_params(config['training'])
             mlflow.log_param("trainset_path", str(trainset_path))
             if train_date:
                 mlflow.log_param("train_date", str(train_date))
-            
+
             # 태그 로깅
             for k, v in mlflow_conf.get('tags', {}).items():
                 mlflow.set_tag(k, v)
@@ -120,7 +211,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             best_metric = None
             best_epoch = 0
             EPOCHS = config['training']['epochs']
-            
+
             # [추가] 학습용 파라미터 추출
             batch_size = config['training'].get('batch_size', 4096)
             temperature = config['training'].get('temperature', 0.1)
@@ -128,6 +219,11 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             weighting = config['training'].get('weighting', 'log1p')
             min_train_cooccur = config['training'].get('min_train_cooccur', 1)
             enable_low_cooccur_filter = config['training'].get('enable_low_cooccur_filter', False)
+            use_relation_loss = config['training'].get('use_relation_loss', False)
+            relation_batch_size = config['training'].get('relation_batch_size', batch_size)
+            lambda_news_loss = config['training'].get('lambda_news_loss', 1.0)
+            lambda_relation_loss = config['training'].get('lambda_relation_loss', 1.0)
+            relation_loss_types = config['training'].get('relation_loss_types', ['key2stock'])
             eval_k = config['training'].get('eval_k', 10)
             implicit_seed = config['training'].get('implicit_eval_seed', seed)
             implicit_sample_limit = config['training'].get('implicit_sample_limit', 500)
@@ -136,88 +232,103 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
 
             def _state_dict_to_cpu(module):
                 return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
-            
+
             def _filter_core_metrics(metrics_dict):
-                core_keys = {
-                    "val_mrr",
-                    f"val_hit_at_{eval_k}",
-                    "holdout_final_score",
-                    "holdout_final_score_missing",
-                    "holdout_final_final_score",
-                    "holdout_final_final_score_missing",
-                    "gold_final_score",
-                    "gold_final_score_missing",
-                    f"holdout_key2stock_mrr",
-                    f"holdout_key2key_mrr",
-                    f"holdout_stock2stock_mrr",
-                    f"holdout_key2stock_hit_at_{eval_k}",
-                    f"holdout_key2key_hit_at_{eval_k}",
-                    f"holdout_stock2stock_hit_at_{eval_k}",
-                    f"holdout_final_key2stock_mrr",
-                    f"holdout_final_key2key_mrr",
-                    f"holdout_final_stock2stock_mrr",
-                    f"holdout_final_key2stock_hit_at_{eval_k}",
-                    f"holdout_final_key2key_hit_at_{eval_k}",
-                    f"holdout_final_stock2stock_hit_at_{eval_k}",
+                allowed_prefixes = (
+                    'val_',
+                    'holdout_',
+                    'holdout_final_',
+                    'holdout_after_update_',
+                    'holdout_final_after_update_',
+                    'holdout_update_delta_',
+                    'holdout_final_update_delta_',
+                    'gold_',
+                )
+                allowed_suffixes = (
+                    '_mrr',
+                    f'_hit_at_{eval_k}',
+                    f'_recall_at_{eval_k}',
+                    f'_map_at_{eval_k}',
+                    '_final_score',
+                    '_final_score_missing',
+                    '_query_count',
+                )
+                return {
+                    k: v for k, v in metrics_dict.items()
+                    if k.startswith(allowed_prefixes) and k.endswith(allowed_suffixes)
                 }
-                return {k: v for k, v in metrics_dict.items() if k in core_keys}
 
             for epoch in range(1, EPOCHS + 1):
                 # [변경] Config 값 전달
                 loss, train_stats = train_one_epoch(
-                    model, optimizer, train_data, None, target_edge_types, 
-                    batch_size=batch_size, 
+                    model, optimizer, train_data, None, target_edge_types,
+                    batch_size=batch_size,
                     temperature=temperature,
                     loss_mode=loss_mode,
                     weighting=weighting,
                     min_train_cooccur=min_train_cooccur,
-                    enable_low_cooccur_filter=enable_low_cooccur_filter
+                    enable_low_cooccur_filter=enable_low_cooccur_filter,
+                    use_relation_loss=use_relation_loss,
+                    relation_batch_size=relation_batch_size,
+                    lambda_news_loss=lambda_news_loss,
+                    lambda_relation_loss=lambda_relation_loss,
+                    relation_data_store=train_relation_store,
+                    relation_loss_types=relation_loss_types,
                 )
 
                 # 평가 주기 (10 에폭마다 or 마지막 에폭)
                 if epoch % 10 == 0 or epoch == EPOCHS:
-                    # [변경] k 값 전달
-                    val_data_gpu = val_data.to(device)
+                    # Validation은 full graph를 유지하되, train graph를 잠시 내려 GPU 중복 점유를 피한다.
+                    train_data = train_data.cpu()
+                    del train_data
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    model = model.to(torch.device('cpu'))
                     try:
                         metrics = evaluate(
                             model,
-                            val_data_gpu,
+                            val_data,
                             target_edge_types,
                             k=eval_k,
-                            eval_implicit=False,
+                            eval_implicit=True,
                             split_prefix="val",
                             implicit_seed=implicit_seed,
                             implicit_sample_limit=implicit_sample_limit,
-                            compute_final_score=False,
+                            compute_final_score=True,
+                            relation_ground_truth_edge_index_dict=_build_relation_ground_truth_edge_index_dict(val_data,
+                                                                                                               target_edge_types),
                         )
                     finally:
-                        del val_data_gpu
+                        if name_to_idx_map and golden_cases:
+                            gold_metrics = evaluate_golden_set(
+                                model, raw_data, golden_cases, name_to_idx_map, torch.device('cpu'), k=eval_k
+                            )
+                            metrics.update(gold_metrics)
+                        model = model.to(device)
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                    
-                    
-                    # Golden Set 평가
-                    if name_to_idx_map and golden_cases:
-                        gold_metrics = evaluate_golden_set(
-                            model, raw_data, golden_cases, name_to_idx_map, device, k=eval_k
-                        )
-                        metrics.update(gold_metrics)
+
+                    train_data = train_data_cpu.to(device)
 
                     # 로깅
                     print(
                         f"Ep {epoch:03d} | Loss: {loss:.4f} | "
-                        f"{selection_metric}: {metrics.get(selection_metric,0):.4f} | "
+                        f"{selection_metric}: {metrics.get(selection_metric, 0):.4f} | "
+                        f"news_loss: {train_stats.get('train_news_loss', 0.0):.4f} | "
+                        f"rel_loss: {train_stats.get('train_relation_loss', 0.0):.4f} | "
                         f"avg_w: {train_stats.get('train_avg_weight', 0.0):.4f} | "
-                        f"used_ratio: {train_stats.get('train_positive_used_ratio', 0.0):.3f}",
+                        f"used_ratio: {train_stats.get('train_positive_used_ratio', 0.0):.3f} | "
+                        f"rel_used_ratio: {train_stats.get('train_relation_positive_used_ratio', 0.0):.3f}",
                         flush=True
                     )
-                    
+
                     mlflow.log_metric("loss", loss, step=epoch)
                     for k, v in train_stats.items():
                         mlflow.log_metric(k, v, step=epoch)
                     for k, v in _filter_core_metrics(metrics).items():
                         mlflow.log_metric(k, v, step=epoch)
-                    
+
                     # Best Model 추적
                     current_metric = metrics.get(selection_metric)
                     if current_metric is not None:
@@ -246,12 +357,20 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                 best_state = _state_dict_to_cpu(model)
                 best_epoch = EPOCHS
             final_state = _state_dict_to_cpu(model)
-            model.load_state_dict(best_state)
-            test_data_gpu = test_data.to(device)
+
+            del train_data
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            holdout_device = torch.device('cpu')
+            model = model.to(holdout_device)
+            test_data_cpu = test_data
             try:
+                model.load_state_dict(best_state)
+                relation_edges = _build_relation_ground_truth_edge_index_dict(test_data_cpu, target_edge_types)
                 holdout_metrics = evaluate(
                     model,
-                    test_data_gpu,
+                    test_data_cpu,
                     target_edge_types,
                     k=eval_k,
                     eval_implicit=True,
@@ -259,13 +378,41 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                     implicit_seed=implicit_seed,
                     implicit_sample_limit=implicit_sample_limit,
                     compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=False),
                 )
+                holdout_after_update_metrics = evaluate(
+                    model,
+                    test_data_cpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_after_update",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=True),
+                )
+                holdout_metrics.update(holdout_after_update_metrics)
+                holdout_metrics.update(_compute_update_delta_metrics(
+                    holdout_metrics,
+                    holdout_after_update_metrics,
+                    "holdout",
+                    "holdout_after_update",
+                    "holdout_update_delta",
+                    eval_k,
+                ))
                 mlflow.log_metrics(_filter_core_metrics(holdout_metrics), step=best_epoch)
-                model.load_state_dict(final_state)
 
+                model.load_state_dict(final_state)
                 final_holdout_metrics = evaluate(
                     model,
-                    test_data_gpu,
+                    test_data_cpu,
                     target_edge_types,
                     k=eval_k,
                     eval_implicit=True,
@@ -273,10 +420,38 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                     implicit_seed=implicit_seed,
                     implicit_sample_limit=implicit_sample_limit,
                     compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=False),
                 )
+                final_holdout_after_update_metrics = evaluate(
+                    model,
+                    test_data_cpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_final_after_update",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=True),
+                )
+                final_holdout_metrics.update(final_holdout_after_update_metrics)
+                final_holdout_metrics.update(_compute_update_delta_metrics(
+                    final_holdout_metrics,
+                    final_holdout_after_update_metrics,
+                    "holdout_final",
+                    "holdout_final_after_update",
+                    "holdout_final_update_delta",
+                    eval_k,
+                ))
                 mlflow.log_metrics(_filter_core_metrics(final_holdout_metrics), step=EPOCHS)
             finally:
-                del test_data_gpu
+                model = model.to(torch.device('cpu'))
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -289,22 +464,15 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             # 임베딩 생성 (학습 완료된 모델로 전체 추론)
             model.eval()
             with torch.no_grad():
-                # train graph tensor가 GPU에 상주 중이면 임베딩 추론 전에 해제
-                del train_data
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                full_gpu = raw_data.to(device)
-                emb_gpu = model.encoder(full_gpu.x_dict, full_gpu.edge_index_dict)
+                emb_cpu_dict = model.encoder(raw_data.x_dict, raw_data.edge_index_dict)
 
-            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_gpu.items()}
-            del emb_gpu
-            del full_gpu
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_cpu_dict.items()}
+            del emb_cpu_dict
 
             emb_cpu = {k: v.numpy() for k, v in emb_tensor_cpu.items()}
             local_emb_path = "/tmp/node_embeddings.pkl"
-            with open(local_emb_path, 'wb') as f: pickle.dump(emb_cpu, f)
+            with open(local_emb_path, 'wb') as f:
+                pickle.dump(emb_cpu, f)
             mlflow.log_artifact(local_emb_path)
 
             # Node mapping도 동일 run의 artifact로 보관해 serving 단계에서 동일 버전 참조
@@ -314,7 +482,8 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                     pickle.dump(serving_mapping, f_out)
                 mlflow.log_artifact(local_mapping_path)
             else:
-                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.", flush=True)
+                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.",
+                      flush=True)
 
             # Gold keyword/stock cosine similarity report
             report = build_gold_similarity_report(
@@ -346,30 +515,45 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
                 mlflow.set_tag("summary_selection_metric", selection_metric)
                 mlflow.set_tag("summary_selection_mode", selection_mode)
             if holdout_metrics:
-                holdout_final = holdout_metrics.get("holdout_final_score", 0.0)
-                holdout_missing = holdout_metrics.get("holdout_final_score_missing", 1.0)
+                holdout_final = holdout_metrics.get("holdout_after_update_final_score",
+                                                    holdout_metrics.get("holdout_final_score", 0.0))
+                holdout_missing = holdout_metrics.get("holdout_after_update_final_score_missing",
+                                                      holdout_metrics.get("holdout_final_score_missing", 1.0))
                 mlflow.log_metric("summary_holdout_final_score", holdout_final)
+                if "holdout_update_delta_final_score" in holdout_metrics:
+                    mlflow.log_metric("summary_holdout_update_delta_final_score",
+                                      holdout_metrics["holdout_update_delta_final_score"])
                 mlflow.log_metric("summary_holdout_final_score_missing", holdout_missing)
                 mlflow.set_tag("summary_holdout_eval_epoch", str(best_epoch))
             if final_holdout_metrics:
-                holdout_final2 = final_holdout_metrics.get("holdout_final_final_score", 0.0)
-                holdout_missing2 = final_holdout_metrics.get("holdout_final_final_score_missing", 1.0)
+                holdout_final2 = final_holdout_metrics.get("holdout_final_after_update_final_score",
+                                                           final_holdout_metrics.get("holdout_final_final_score", 0.0))
+                holdout_missing2 = final_holdout_metrics.get("holdout_final_after_update_final_score_missing",
+                                                             final_holdout_metrics.get(
+                                                                 "holdout_final_final_score_missing", 1.0))
                 mlflow.log_metric("summary_holdout_final_checkpoint_score", holdout_final2)
+                if "holdout_final_update_delta_final_score" in final_holdout_metrics:
+                    mlflow.log_metric("summary_holdout_final_checkpoint_delta_final_score",
+                                      final_holdout_metrics["holdout_final_update_delta_final_score"])
                 mlflow.log_metric("summary_holdout_final_checkpoint_missing", holdout_missing2)
                 mlflow.set_tag("summary_holdout_final_checkpoint_epoch", str(EPOCHS))
 
             # 9. Gate & Promotion Tagging
-            holdout_final_checkpoint = final_holdout_metrics.get("holdout_final_final_score", 0.0) if final_holdout_metrics else 0.0
-            holdout_final_checkpoint_missing = final_holdout_metrics.get("holdout_final_final_score_missing", 1.0) if final_holdout_metrics else 1.0
+            holdout_final_checkpoint = final_holdout_metrics.get("holdout_final_after_update_final_score",
+                                                                 final_holdout_metrics.get("holdout_final_final_score",
+                                                                                           0.0)) if final_holdout_metrics else 0.0
+            holdout_final_checkpoint_missing = final_holdout_metrics.get(
+                "holdout_final_after_update_final_score_missing",
+                final_holdout_metrics.get("holdout_final_final_score_missing", 1.0)) if final_holdout_metrics else 1.0
             gate_passed = (
-                float(holdout_final_checkpoint_missing) == 0.0 and
-                float(holdout_final_checkpoint) > float(gate_threshold)
+                    float(holdout_final_checkpoint_missing) == 0.0 and
+                    float(holdout_final_checkpoint) > float(gate_threshold)
             )
             version_name = str(output_path).strip("/").split("/")[-1] if output_path else run.info.run_id
 
-            mlflow.log_metric("gate_threshold_holdout_final_final_score", float(gate_threshold))
+            mlflow.log_metric("gate_threshold_holdout_final_after_update_final_score", float(gate_threshold))
             mlflow.log_metric("gate_passed", 1.0 if gate_passed else 0.0)
-            mlflow.set_tag("gate_metric", "holdout_final_final_score")
+            mlflow.set_tag("gate_metric", "holdout_final_after_update_final_score")
             mlflow.set_tag("gate_operator", ">")
             mlflow.set_tag("gate_threshold", str(gate_threshold))
             mlflow.set_tag("gate_require_missing_zero", "true")
@@ -379,7 +563,7 @@ def run_training_pipeline(trainset_path, output_path, aws_info, config, raw_data
             if gate_passed:
                 mlflow.set_tag("status", "candidate")
                 print(
-                    f"✅ Gate passed: holdout_final_final_score={holdout_final_checkpoint:.4f} > {gate_threshold}. status=candidate",
+                    f"✅ Gate passed: holdout_final_after_update_final_score={holdout_final_checkpoint:.4f} > {gate_threshold}. status=candidate",
                     flush=True
                 )
             else:
@@ -423,29 +607,29 @@ def _state_dict_to_cpu(module):
 
 
 def _filter_core_metrics(metrics_dict, eval_k):
-    core_keys = {
-        "val_mrr",
-        f"val_hit_at_{eval_k}",
-        "holdout_final_score",
-        "holdout_final_score_missing",
-        "holdout_final_final_score",
-        "holdout_final_final_score_missing",
-        "gold_final_score",
-        "gold_final_score_missing",
-        f"holdout_key2stock_mrr",
-        f"holdout_key2key_mrr",
-        f"holdout_stock2stock_mrr",
-        f"holdout_key2stock_hit_at_{eval_k}",
-        f"holdout_key2key_hit_at_{eval_k}",
-        f"holdout_stock2stock_hit_at_{eval_k}",
-        f"holdout_final_key2stock_mrr",
-        f"holdout_final_key2key_mrr",
-        f"holdout_final_stock2stock_mrr",
-        f"holdout_final_key2stock_hit_at_{eval_k}",
-        f"holdout_final_key2key_hit_at_{eval_k}",
-        f"holdout_final_stock2stock_hit_at_{eval_k}",
+    allowed_prefixes = (
+        'val_',
+        'holdout_',
+        'holdout_final_',
+        'holdout_after_update_',
+        'holdout_final_after_update_',
+        'holdout_update_delta_',
+        'holdout_final_update_delta_',
+        'gold_',
+    )
+    allowed_suffixes = (
+        '_mrr',
+        f'_hit_at_{eval_k}',
+        f'_recall_at_{eval_k}',
+        f'_map_at_{eval_k}',
+        '_final_score',
+        '_final_score_missing',
+        '_query_count',
+    )
+    return {
+        k: v for k, v in metrics_dict.items()
+        if k.startswith(allowed_prefixes) and k.endswith(allowed_suffixes)
     }
-    return {k: v for k, v in metrics_dict.items() if k in core_keys}
 
 
 def _build_model(raw_data, config, device):
@@ -482,7 +666,11 @@ def run_training_stage(trainset_path, output_path, aws_info, config, stage_dir, 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = _build_model(raw_data, config, device)
         optimizer = Adam(model.parameters(), lr=config['training']['lr'])
-        train_data = train_data.to(device)
+        train_data_cpu = train_data
+        relation_loss_types = config['training'].get('relation_loss_types', ['key2stock'])
+        train_relation_store = _extract_relation_store(train_data_cpu, relation_loss_types)
+        train_data_cpu = _strip_relation_store(train_data_cpu)
+        train_data = train_data_cpu.to(device)
 
         mlflow_conf = config.get('mlflow', {})
         mlflow.set_experiment(mlflow_conf.get('experiment_name', 'Default'))
@@ -523,6 +711,11 @@ def run_training_stage(trainset_path, output_path, aws_info, config, stage_dir, 
             weighting = config['training'].get('weighting', 'log1p')
             min_train_cooccur = config['training'].get('min_train_cooccur', 1)
             enable_low_cooccur_filter = config['training'].get('enable_low_cooccur_filter', False)
+            use_relation_loss = config['training'].get('use_relation_loss', False)
+            relation_batch_size = config['training'].get('relation_batch_size', batch_size)
+            lambda_news_loss = config['training'].get('lambda_news_loss', 1.0)
+            lambda_relation_loss = config['training'].get('lambda_relation_loss', 1.0)
+            relation_loss_types = config['training'].get('relation_loss_types', ['key2stock'])
 
             for epoch in range(1, epochs + 1):
                 loss, train_stats = train_one_epoch(
@@ -532,39 +725,56 @@ def run_training_stage(trainset_path, output_path, aws_info, config, stage_dir, 
                     loss_mode=loss_mode,
                     weighting=weighting,
                     min_train_cooccur=min_train_cooccur,
-                    enable_low_cooccur_filter=enable_low_cooccur_filter
+                    enable_low_cooccur_filter=enable_low_cooccur_filter,
+                    use_relation_loss=use_relation_loss,
+                    relation_batch_size=relation_batch_size,
+                    lambda_news_loss=lambda_news_loss,
+                    lambda_relation_loss=lambda_relation_loss,
+                    relation_data_store=train_relation_store,
+                    relation_loss_types=relation_loss_types,
                 )
 
                 if epoch % 10 == 0 or epoch == epochs:
-                    val_data_gpu = val_data.to(device)
+                    train_data = train_data.cpu()
+                    del train_data
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    model = model.to(torch.device('cpu'))
                     try:
                         metrics = evaluate(
                             model,
-                            val_data_gpu,
+                            val_data,
                             target_edge_types,
                             k=eval_k,
-                            eval_implicit=False,
+                            eval_implicit=True,
                             split_prefix="val",
                             implicit_seed=implicit_seed,
                             implicit_sample_limit=implicit_sample_limit,
-                            compute_final_score=False,
+                            compute_final_score=True,
+                            relation_ground_truth_edge_index_dict=_build_relation_ground_truth_edge_index_dict(val_data,
+                                                                                                               target_edge_types),
                         )
                     finally:
-                        del val_data_gpu
+                        if name_to_idx_map and golden_cases:
+                            gold_metrics = evaluate_golden_set(
+                                model, raw_data, golden_cases, name_to_idx_map, torch.device('cpu'), k=eval_k
+                            )
+                            metrics.update(gold_metrics)
+                        model = model.to(device)
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
 
-                    if name_to_idx_map and golden_cases:
-                        gold_metrics = evaluate_golden_set(
-                            model, raw_data, golden_cases, name_to_idx_map, device, k=eval_k
-                        )
-                        metrics.update(gold_metrics)
+                    train_data = train_data_cpu.to(device)
 
                     print(
                         f"Ep {epoch:03d} | Loss: {loss:.4f} | "
                         f"{selection_metric}: {metrics.get(selection_metric, 0):.4f} | "
+                        f"news_loss: {train_stats.get('train_news_loss', 0.0):.4f} | "
+                        f"rel_loss: {train_stats.get('train_relation_loss', 0.0):.4f} | "
                         f"avg_w: {train_stats.get('train_avg_weight', 0.0):.4f} | "
-                        f"used_ratio: {train_stats.get('train_positive_used_ratio', 0.0):.3f}",
+                        f"used_ratio: {train_stats.get('train_positive_used_ratio', 0.0):.3f} | "
+                        f"rel_used_ratio: {train_stats.get('train_relation_positive_used_ratio', 0.0):.3f}",
                         flush=True
                     )
 
@@ -688,12 +898,15 @@ def run_evaluation_stage(stage_dir, aws_info):
             best_state = torch.load(os.path.join(stage_dir, "best_model.pt"), map_location='cpu')
             final_state = torch.load(os.path.join(stage_dir, "final_model.pt"), map_location='cpu')
 
-            model.load_state_dict(best_state)
-            test_data_gpu = test_data.to(device)
+            holdout_device = torch.device('cpu')
+            model = model.to(holdout_device)
+            test_data_cpu = test_data
             try:
+                model.load_state_dict(best_state)
+                relation_edges = _build_relation_ground_truth_edge_index_dict(test_data_cpu, target_edge_types)
                 holdout_metrics = evaluate(
                     model,
-                    test_data_gpu,
+                    test_data_cpu,
                     target_edge_types,
                     k=eval_k,
                     eval_implicit=True,
@@ -701,13 +914,41 @@ def run_evaluation_stage(stage_dir, aws_info):
                     implicit_seed=implicit_seed,
                     implicit_sample_limit=implicit_sample_limit,
                     compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=False),
                 )
+                holdout_after_update_metrics = evaluate(
+                    model,
+                    test_data_cpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_after_update",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=True),
+                )
+                holdout_metrics.update(holdout_after_update_metrics)
+                holdout_metrics.update(_compute_update_delta_metrics(
+                    holdout_metrics,
+                    holdout_after_update_metrics,
+                    "holdout",
+                    "holdout_after_update",
+                    "holdout_update_delta",
+                    eval_k,
+                ))
                 mlflow.log_metrics(_filter_core_metrics(holdout_metrics, eval_k), step=best_epoch)
 
                 model.load_state_dict(final_state)
                 final_holdout_metrics = evaluate(
                     model,
-                    test_data_gpu,
+                    test_data_cpu,
                     target_edge_types,
                     k=eval_k,
                     eval_implicit=True,
@@ -715,22 +956,49 @@ def run_evaluation_stage(stage_dir, aws_info):
                     implicit_seed=implicit_seed,
                     implicit_sample_limit=implicit_sample_limit,
                     compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=False),
                 )
+                final_holdout_after_update_metrics = evaluate(
+                    model,
+                    test_data_cpu,
+                    target_edge_types,
+                    k=eval_k,
+                    eval_implicit=True,
+                    split_prefix="holdout_final_after_update",
+                    implicit_seed=implicit_seed,
+                    implicit_sample_limit=implicit_sample_limit,
+                    compute_final_score=True,
+                    relation_ground_truth_edge_index_dict=relation_edges,
+                    message_passing_edge_index_dict=_build_message_passing_edge_index_dict(test_data_cpu,
+                                                                                           target_edge_types,
+                                                                                           use_online_update=True),
+                )
+                final_holdout_metrics.update(final_holdout_after_update_metrics)
+                final_holdout_metrics.update(_compute_update_delta_metrics(
+                    final_holdout_metrics,
+                    final_holdout_after_update_metrics,
+                    "holdout_final",
+                    "holdout_final_after_update",
+                    "holdout_final_update_delta",
+                    eval_k,
+                ))
                 mlflow.log_metrics(_filter_core_metrics(final_holdout_metrics, eval_k), step=epochs)
             finally:
-                del test_data_gpu
+                model = model.to(device)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
             print("💾 Saving Model & Embeddings...", flush=True)
+            model = model.to(torch.device('cpu'))
             model.eval()
             with torch.no_grad():
-                full_gpu = raw_data.to(device)
-                emb_gpu = model.encoder(full_gpu.x_dict, full_gpu.edge_index_dict)
+                emb_cpu_dict = model.encoder(raw_data.x_dict, raw_data.edge_index_dict)
 
-            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_gpu.items()}
-            del emb_gpu
-            del full_gpu
+            emb_tensor_cpu = {k: v.detach().cpu() for k, v in emb_cpu_dict.items()}
+            del emb_cpu_dict
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -746,7 +1014,8 @@ def run_evaluation_stage(stage_dir, aws_info):
                     pickle.dump(serving_mapping, f_out)
                 mlflow.log_artifact(local_mapping_path)
             else:
-                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.", flush=True)
+                print("⚠️ Filtered serving mapping unavailable. node_mapping.pkl artifact will not be logged.",
+                      flush=True)
 
             report = build_gold_similarity_report(
                 emb_tensor_cpu,
@@ -768,27 +1037,38 @@ def run_evaluation_stage(stage_dir, aws_info):
             if os.path.exists("/tmp/gold_similarity.txt"): os.remove("/tmp/gold_similarity.txt")
             del emb_tensor_cpu
 
-            holdout_final = holdout_metrics.get("holdout_final_score", 0.0)
-            holdout_missing = holdout_metrics.get("holdout_final_score_missing", 1.0)
+            holdout_final = holdout_metrics.get("holdout_after_update_final_score",
+                                                holdout_metrics.get("holdout_final_score", 0.0))
+            holdout_missing = holdout_metrics.get("holdout_after_update_final_score_missing",
+                                                  holdout_metrics.get("holdout_final_score_missing", 1.0))
             mlflow.log_metric("summary_holdout_final_score", holdout_final)
+            if "holdout_update_delta_final_score" in holdout_metrics:
+                mlflow.log_metric("summary_holdout_update_delta_final_score",
+                                  holdout_metrics["holdout_update_delta_final_score"])
             mlflow.log_metric("summary_holdout_final_score_missing", holdout_missing)
             mlflow.set_tag("summary_holdout_eval_epoch", str(best_epoch))
 
-            holdout_final2 = final_holdout_metrics.get("holdout_final_final_score", 0.0)
-            holdout_missing2 = final_holdout_metrics.get("holdout_final_final_score_missing", 1.0)
+            holdout_final2 = final_holdout_metrics.get("holdout_final_after_update_final_score",
+                                                       final_holdout_metrics.get("holdout_final_final_score", 0.0))
+            holdout_missing2 = final_holdout_metrics.get("holdout_final_after_update_final_score_missing",
+                                                         final_holdout_metrics.get("holdout_final_final_score_missing",
+                                                                                   1.0))
             mlflow.log_metric("summary_holdout_final_checkpoint_score", holdout_final2)
+            if "holdout_final_update_delta_final_score" in final_holdout_metrics:
+                mlflow.log_metric("summary_holdout_final_checkpoint_delta_final_score",
+                                  final_holdout_metrics["holdout_final_update_delta_final_score"])
             mlflow.log_metric("summary_holdout_final_checkpoint_missing", holdout_missing2)
             mlflow.set_tag("summary_holdout_final_checkpoint_epoch", str(epochs))
 
             gate_passed = (
-                float(holdout_missing2) == 0.0 and
-                float(holdout_final2) > float(gate_threshold)
+                    float(holdout_missing2) == 0.0 and
+                    float(holdout_final2) > float(gate_threshold)
             )
             version_name = str(output_path).strip("/").split("/")[-1] if output_path else run.info.run_id
 
-            mlflow.log_metric("gate_threshold_holdout_final_final_score", float(gate_threshold))
+            mlflow.log_metric("gate_threshold_holdout_final_after_update_final_score", float(gate_threshold))
             mlflow.log_metric("gate_passed", 1.0 if gate_passed else 0.0)
-            mlflow.set_tag("gate_metric", "holdout_final_final_score")
+            mlflow.set_tag("gate_metric", "holdout_final_after_update_final_score")
             mlflow.set_tag("gate_operator", ">")
             mlflow.set_tag("gate_threshold", str(gate_threshold))
             mlflow.set_tag("gate_require_missing_zero", "true")
@@ -798,7 +1078,7 @@ def run_evaluation_stage(stage_dir, aws_info):
             if gate_passed:
                 mlflow.set_tag("status", "candidate")
                 print(
-                    f"✅ Gate passed: holdout_final_final_score={holdout_final2:.4f} > {gate_threshold}. status=candidate",
+                    f"✅ Gate passed: holdout_final_after_update_final_score={holdout_final2:.4f} > {gate_threshold}. status=candidate",
                     flush=True
                 )
             else:

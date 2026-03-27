@@ -6,16 +6,17 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+
 def set_seed(seed=42):
     # 1. 기본 시드 고정
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
-    
+
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    
+
     # 2. [중요] CUDNN 결정론적 모드 (속도 저하 없음)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -27,8 +28,9 @@ def set_seed(seed=42):
 
     # 4. [핵심] CUBLAS 설정 (이게 없으면 위 3번에서 에러 남)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    
+
     print(f"🔒 Random Seed & Deterministic Mode set to: {seed}", flush=True)
+
 
 def load_config(config_path):
     """Config JSON 파일 로드"""
@@ -37,10 +39,12 @@ def load_config(config_path):
             return json.load(f)
     return {}
 
+
 def get_module_path(filename):
     """modules/training/ 내의 파일 절대 경로 반환"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(current_dir, filename)
+
 
 def load_json_file(filename):
     """모듈 폴더 내 JSON 파일 로드 (예: golden_cases.json)"""
@@ -54,6 +58,7 @@ def load_json_file(filename):
         print(f"⚠️ Error loading {filename}: {e}")
         return []
 
+
 def log_file_artifact(filename):
     """모듈 폴더 내 파일을 MLflow Artifact로 업로드"""
     path = get_module_path(filename)
@@ -62,6 +67,7 @@ def log_file_artifact(filename):
         mlflow.log_artifact(path)
     else:
         print(f"⚠️ Artifact not found: {path}")
+
 
 def build_gold_similarity_report(emb, golden_cases, name_to_idx_map, edge_index_dict=None, top_k=10, min_cooccur=3):
     """

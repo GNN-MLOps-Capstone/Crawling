@@ -22,7 +22,7 @@ DOCKER_NETWORK = 'crawling_news-network'
 SILVER_DATASET = Dataset("s3://silver/trainset")
 GOLD_MODEL_ARTIFACT = Dataset("s3://gold/gnn")
 DEFAULT_EXPERIMENT_NAME = "News_GNN_v1"
-STAGE_ROOT = '/home/dobi/Crawling/tmp/gnn_split_test'
+STAGE_VOLUME_NAME = 'gnn_split_test_stage'
 
 default_args = {
     'owner': 'dongbin',
@@ -102,7 +102,7 @@ def training_pipeline():
     config_data = prepare_config()
     shared_mounts = [
         Mount(source='/home/dobi/Crawling/dags/modules', target='/app/modules', type='bind'),
-        Mount(source=STAGE_ROOT, target='/app/tmp/gnn_split_test', type='bind')
+        Mount(source=STAGE_VOLUME_NAME, target='/app/tmp/gnn_split_test', type='volume')
     ]
 
     train_task = DockerOperator(
