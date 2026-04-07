@@ -11,17 +11,24 @@ from torch_geometric.transforms import RandomLinkSplit
 from collections import defaultdict
 
 
+def _filter_node_store_attrs(node_store, mask, original_num_nodes):
+    for key, value in list(node_store.items()):
+        if isinstance(value, torch.Tensor) and value.dim() > 0 and value.size(0) == original_num_nodes:
+            node_store[key] = value[mask]
+
+
 # -----------------------------------------------------------
-# 1. 노드 필터링 함수 (키워드/주식용) 
+# 1. 노드 필터링 함수 (키워드/주식용)
 # -----------------------------------------------------------
-def filter_low_frequency_nodes(data, node_type, edge_type, rev_edge_type, min_freq=3):
+def filter_low_frequency_nodes(data, node_type, edge_type, rev_edge_type, min_freq=3, degree_edge_index=None):
     print(f"🧹 Filtering {node_type} with frequency < {min_freq}...", flush=True)
 
     edge_index = data[edge_type].edge_index
     num_nodes = data[node_type].num_nodes
+    degree_edge_index = edge_index if degree_edge_index is None else degree_edge_index
 
     # Degree 계산 & 마스크 생성
-    degrees = torch.bincount(edge_index[1], minlength=num_nodes)
+    degrees = torch.bincount(degree_edge_index[1], minlength=num_nodes)
     mask = degrees >= min_freq
     valid_indices = mask.nonzero(as_tuple=False).view(-1)
 
@@ -35,9 +42,8 @@ def filter_low_frequency_nodes(data, node_type, edge_type, rev_edge_type, min_fr
     if valid_indices.numel() == num_nodes:
         return data, mapping
 
-        # Feature 필터링
-    if data[node_type].x is not None:
-        data[node_type].x = data[node_type].x[mask]
+        # 노드 속성 필터링
+    _filter_node_store_attrs(data[node_type], mask, num_nodes)
 
     # Edge 업데이트 (Forward: News -> Target)
     edge_mask = mask[edge_index[1]]
@@ -84,8 +90,7 @@ def remove_isolated_news(data):
     news_mapping = torch.full((num_news,), -1, dtype=torch.long)
     news_mapping[valid_news_indices] = torch.arange(valid_news_indices.numel())
 
-    if data['news'].x is not None:
-        data['news'].x = data['news'].x[connected_news_mask]
+    _filter_node_store_attrs(data['news'], connected_news_mask, num_news)
 
     for edge_type in list(data.edge_index_dict.keys()):
         src_type, rel, dst_type = edge_type
@@ -178,6 +183,22 @@ def add_pmi_global_edges(data, min_pmi=0.1, min_cooccur=3):
     return data, count
 
 
+def _build_train_only_temporal_graph(data, train_end_ts):
+    train_only_data = copy.deepcopy(data)
+    target_edge_types = [('news', 'has_keyword', 'keyword'), ('news', 'has_stock', 'stock')]
+    rev_edge_types = [('keyword', 'rev_has_keyword', 'news'), ('stock', 'rev_has_stock', 'news')]
+    pub_ts = train_only_data['news'].pub_ts.cpu().long()
+
+    for et, rev_et in zip(target_edge_types, rev_edge_types):
+        full_edge_index = train_only_data[et].edge_index.cpu()
+        edge_ts = pub_ts[full_edge_index[0]]
+        train_edge_index = full_edge_index[:, edge_ts <= train_end_ts]
+        train_only_data[et].edge_index = train_edge_index
+        train_only_data[rev_et].edge_index = torch.stack([train_edge_index[1], train_edge_index[0]], dim=0)
+
+    return train_only_data
+
+
 # -----------------------------------------------------------
 # 4. 메인 로드 함수 (수정됨)
 # -----------------------------------------------------------
@@ -187,6 +208,7 @@ def load_data_from_s3(path, aws_info, config=None):  # [변경] config 인자 �
     # Config에서 파라미터 추출 (기본값 설정)
     if config is None: config = {}
     data_conf = config.get('data_processing', {})
+    training_conf = config.get('training', {})
 
     min_freq_keyword = data_conf.get('min_freq_keyword', 7)
     min_freq_stock = data_conf.get('min_freq_stock', 5)
@@ -202,26 +224,75 @@ def load_data_from_s3(path, aws_info, config=None):  # [변경] config 인자 �
     with fs.open(f"silver/{path}", 'rb') as f:
         data = torch.load(f, weights_only=False)
 
-    # 1. 키워드 & 주식 필터링 (Config 값 사용)
-    data, keyword_mapping = filter_low_frequency_nodes(
-        data, 'keyword',
-        ('news', 'has_keyword', 'keyword'),
-        ('keyword', 'rev_has_keyword', 'news'),
-        min_freq=min_freq_keyword
-    )
+    split_mode = training_conf.get('split_mode', 'random')
+    keyword_mapping = torch.arange(data['keyword'].num_nodes, dtype=torch.long)
+    stock_mapping = torch.arange(data['stock'].num_nodes, dtype=torch.long)
 
-    data, stock_mapping = filter_low_frequency_nodes(
-        data, 'stock',
-        ('news', 'has_stock', 'stock'),
-        ('stock', 'rev_has_stock', 'news'),
-        min_freq=min_freq_stock
-    )
+    if split_mode == "temporal":
+        if not hasattr(data['news'], 'pub_ts'):
+            raise ValueError("Temporal preprocessing requires data['news'].pub_ts.")
 
-    # 2. 고립된 뉴스 삭제
-    data = remove_isolated_news(data)
+        pub_ts = data['news'].pub_ts.cpu().long()
+        train_end_ts, _ = _resolve_temporal_boundaries(
+            pub_ts=pub_ts,
+            policy=training_conf.get('split_policy', 'date'),
+            val_ratio=training_conf.get('val_ratio', 0.1),
+            test_ratio=training_conf.get('test_ratio', 0.1),
+            train_end_date=training_conf.get('train_end_date'),
+            val_end_date=training_conf.get('val_end_date'),
+        )
+        print(f"🧭 Temporal preprocessing boundary: train<= {train_end_ts}", flush=True)
 
-    # 3. PMI Edge 추가 (Config 값 사용)
-    data, _ = add_pmi_global_edges(data, min_pmi=min_pmi, min_cooccur=min_cooccur)
+        keyword_full_edge_index = data[('news', 'has_keyword', 'keyword')].edge_index.cpu()
+        keyword_train_edge_index = keyword_full_edge_index[:, pub_ts[keyword_full_edge_index[0]] <= train_end_ts]
+        data, keyword_mapping = filter_low_frequency_nodes(
+            data, 'keyword',
+            ('news', 'has_keyword', 'keyword'),
+            ('keyword', 'rev_has_keyword', 'news'),
+            min_freq=min_freq_keyword,
+            degree_edge_index=keyword_train_edge_index,
+        )
+
+        stock_full_edge_index = data[('news', 'has_stock', 'stock')].edge_index.cpu()
+        stock_train_edge_index = stock_full_edge_index[:, pub_ts[stock_full_edge_index[0]] <= train_end_ts]
+        data, stock_mapping = filter_low_frequency_nodes(
+            data, 'stock',
+            ('news', 'has_stock', 'stock'),
+            ('stock', 'rev_has_stock', 'news'),
+            min_freq=min_freq_stock,
+            degree_edge_index=stock_train_edge_index,
+        )
+
+        data = remove_isolated_news(data)
+
+        train_only_data = _build_train_only_temporal_graph(data, train_end_ts)
+        train_only_data, _ = add_pmi_global_edges(train_only_data, min_pmi=min_pmi, min_cooccur=min_cooccur)
+        if ('keyword', 'globally_related', 'stock') in train_only_data.edge_index_dict:
+            data['keyword', 'globally_related', 'stock'].edge_index = train_only_data[
+                'keyword', 'globally_related', 'stock'].edge_index
+            data['stock', 'rev_globally_related', 'keyword'].edge_index = train_only_data[
+                'stock', 'rev_globally_related', 'keyword'].edge_index
+    else:
+        # 1. 키워드 & 주식 필터링 (Config 값 사용)
+        data, keyword_mapping = filter_low_frequency_nodes(
+            data, 'keyword',
+            ('news', 'has_keyword', 'keyword'),
+            ('keyword', 'rev_has_keyword', 'news'),
+            min_freq=min_freq_keyword
+        )
+
+        data, stock_mapping = filter_low_frequency_nodes(
+            data, 'stock',
+            ('news', 'has_stock', 'stock'),
+            ('stock', 'rev_has_stock', 'news'),
+            min_freq=min_freq_stock
+        )
+
+        # 2. 고립된 뉴스 삭제
+        data = remove_isolated_news(data)
+
+        # 3. PMI Edge 추가 (Config 값 사용)
+        data, _ = add_pmi_global_edges(data, min_pmi=min_pmi, min_cooccur=min_cooccur)
 
     print("🔄 [DataLoader] Applying ToUndirected (Global)...", flush=True)
     data = T.ToUndirected()(data)
