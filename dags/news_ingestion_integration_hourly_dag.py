@@ -230,6 +230,21 @@ def news_ingestion_integration_hourly_pipeline():
             "analysis": saved.get("analysis"),
         }
 
+    @task.external_python(python=PYTHON_VENV_PATH, task_id='post_gemini_filter_incremental')
+    def post_gemini_filter_incremental(incremental_paths, aws_info, pg_info, silver_bucket, config_path):
+        import sys
+        sys.path.append('/opt/airflow/dags')
+
+        from modules.analysis.post_gemini_filter import run_post_gemini_filter_for_incremental
+
+        return run_post_gemini_filter_for_incremental(
+            incremental_paths=incremental_paths,
+            aws_info=aws_info,
+            db_info=pg_info,
+            bucket=silver_bucket,
+            config_path=config_path,
+        )
+
     @task.external_python(python=PYTHON_VENV_PATH, task_id='load_incremental_to_db')
     def load_incremental_to_db(window_label, aws_info, pg_info, incremental_paths):
         import sys
@@ -301,7 +316,8 @@ def news_ingestion_integration_hourly_pipeline():
     )
     refined = refinement_incremental(ctx, bronze, targets, ctx["aws"], pg_info, BRONZE_BUCKET, CONFIG_PATH)
     analyzed = gemini_incremental(ctx, refined, ctx["aws"], stock_map, pg_info, SILVER_BUCKET, CONFIG_PATH)
-    loaded = load_incremental_to_db(ctx["window_label"], ctx["aws"], pg_info, analyzed)
+    filtered = post_gemini_filter_incremental(analyzed, ctx["aws"], pg_info, SILVER_BUCKET, CONFIG_PATH)
+    loaded = load_incremental_to_db(ctx["window_label"], ctx["aws"], pg_info, filtered)
     status_after = report_window_status(ctx["window_start"], ctx["window_end"], "after")
     metrics_conf = build_recommendation_metrics_conf(ctx["window_start"], ctx["window_end"])
     trigger_recommendation_metrics = TriggerDagRunOperator(
@@ -314,7 +330,7 @@ def news_ingestion_integration_hourly_pipeline():
         wait_for_completion=False,
     )
 
-    status_before >> bronze >> targets >> refined >> analyzed >> loaded >> status_after >> metrics_conf >> trigger_recommendation_metrics
+    status_before >> bronze >> targets >> refined >> analyzed >> filtered >> loaded >> status_after >> metrics_conf >> trigger_recommendation_metrics
 
 
 dag_instance = news_ingestion_integration_hourly_pipeline()
