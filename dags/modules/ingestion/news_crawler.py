@@ -168,11 +168,7 @@ def run_news_crawler(db_config, filter_file_path, crawler_version='0.02', max_wo
                 new_title = self._extract_full_title(url)
                 old_clean = self._normalize_title(current_title)
                 new_clean = self._normalize_title(new_title)
-                if not new_clean or new_clean == old_clean or self._is_truncated_title(new_clean):
-                    return False
-
-                old_without_ellipsis = old_clean.rstrip('.…').strip()
-                if len(new_clean) < len(old_without_ellipsis):
+                if not new_clean or new_clean == old_clean:
                     return False
 
                 cursor.execute(

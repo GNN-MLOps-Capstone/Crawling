@@ -76,11 +76,7 @@ def run_title_backfill(
         new_clean = normalize_title(new_title)
         if not new_clean or new_clean == old_clean:
             return False
-        if is_truncated(new_clean):
-            return False
-        # 보수적으로: 기존이 truncation이고 새 값이 더 짧지 않을 때만 교체
-        old_without_ellipsis = old_clean.rstrip(".…").strip()
-        return len(new_clean) >= len(old_without_ellipsis)
+        return True
 
     conn = psycopg2.connect(
         host=db_config.get("host"),
