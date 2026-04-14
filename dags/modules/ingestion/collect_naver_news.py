@@ -77,10 +77,12 @@ def run_collect_naver_news(db_config, api_config, query='다', total=1000):
             """뉴스 아이템 파싱"""
             title = re.sub('<.*?>', '', item['title'])  # HTML 태그 제거
             pub_date = parsedate_to_datetime(item['pubDate'])
+            original_url = (item.get('originallink') or '').strip()
+            naver_url = (item.get('link') or '').strip()
             return {
                 'title': title,
                 'pub_date': pub_date,
-                'url': item['link'],
+                'url': original_url or naver_url,
                 'search_keyword': search_keyword,
                 'api_request_date': datetime.now()
             }
@@ -130,7 +132,7 @@ def run_collect_naver_news(db_config, api_config, query='다', total=1000):
                 # 중복 제거 및 파싱
                 new_items = []
                 for item in result['items']:
-                    url = item['link']
+                    url = ((item.get('originallink') or '').strip() or (item.get('link') or '').strip())
                     if url in existing_urls or url in self.collected_urls:
                         continue
                     parsed = self.parse_item(item, query)
