@@ -1,5 +1,5 @@
 # 1. Base Image: PyTorch 공식 Runtime 이미지
-FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
+FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime AS gnn-base
 
 # 2. 시스템 패키지 설치
 RUN apt-get update && apt-get install -y \
@@ -36,3 +36,11 @@ RUN pip install --no-cache-dir \
 
 # 6. PYTHONPATH 설정
 ENV PYTHONPATH=/app
+
+FROM gnn-base AS gnn-test
+
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-cov
+
+FROM gnn-base AS gnn-runtime

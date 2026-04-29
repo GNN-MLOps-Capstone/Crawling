@@ -555,6 +555,49 @@ services:
       - news-network
       - proxy-net
 
+  gnn-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_hourly_pipeline_utils.py
+      tests/test_bandit_posterior_utils.py
+      tests/test_gnn_graph_builder.py
+      tests/test_gnn_training_data_loader.py
+      tests/test_gnn_trainer_gate.py
+      tests/test_gnn_serving_deploy.py
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      DB_HOST: news-database
+      DB_PORT: 5432
+      DB_USER: ${DATA_POSTGRES_USER}
+      DB_PASS: ${DATA_POSTGRES_PASSWORD}
+      DB_NAME: ${DATA_POSTGRES_DB_NAME}
+    volumes:
+      - ./app:/app/app
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+      news-database:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - news-network
+      - proxy-net
+
 
 
 networks:
