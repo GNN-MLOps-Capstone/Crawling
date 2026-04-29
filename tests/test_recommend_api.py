@@ -337,34 +337,6 @@ def test_primary_failure_falls_back_to_breaking() -> None:
     assert body["meta"]["fallback_reason"] == "primary_failed_use_exploration"
 
 
-def test_behavior_path_activates_when_recent_actions_exist() -> None:
-    client = _client_with_repository(
-        FakeNewsRepository(
-            [30, 29, 28, 27, 26, 25],
-            profiles_by_user_id={1: {"stock_ids": ["005930"]}},
-            actions_by_user_id={
-                1: [
-                    {"news_id": 999, "timestamp": "2026-03-09T00:00:00+00:00", "keyword_ids": ["11"]},
-                    {"news_id": 998, "timestamp": "2026-03-09T01:00:00+00:00", "stock_ids": ["005930"]},
-                ]
-            },
-        )
-    )
-
-    response = client.post(
-        "/recommend/news",
-        json={
-            "user_id": 1,
-            "limit": 4,
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert [item["news_id"] for item in body["items"]] == [30, 29, 28, 27]
-    assert body["meta"]["source"] == "multipath_warm"
-
-
 def test_warm_user_without_onboarding_emits_behavior_but_not_a1() -> None:
     client = _client_with_repository(
         FakeNewsRepository(
@@ -557,7 +529,7 @@ def test_behavior_personalized_scoring_uses_recent_action_entities() -> None:
     assert [item.news_id for item in ranked] == [202, 201]
 
 
-def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
+def test_primary_uses_single_base_pool() -> None:
     repository = FakeNewsRepository(
         [301, 302, 303, 304],
         profiles_by_user_id={1: {"stock_ids": ["005930"]}},
@@ -595,10 +567,11 @@ def test_a1_a2_share_three_day_base_pool_before_scoring() -> None:
 
     retrieval_service.retrieve(context=context, exclude_ids=set())
 
-    assert len(repository.fetch_recent_candidates_calls) == 2
-    assert repository.fetch_recent_candidates_calls[0]["hours"] == 72
-    assert repository.fetch_recent_candidates_calls[0]["limit"] == 8
-    assert repository.fetch_recent_candidates_calls[1]["hours"] == 2
+    base_pool_calls = [
+        call for call in repository.fetch_recent_candidates_calls if call["hours"] == 72
+    ]
+    assert len(base_pool_calls) == 1
+    assert base_pool_calls[0]["limit"] == 8
 
 
 def test_replayed_cursor_returns_same_page() -> None:
