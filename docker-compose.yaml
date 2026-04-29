@@ -77,6 +77,14 @@ x-airflow-common:
     AIRFLOW__METRICS__STATSD_HOST: 'airflow-statsd-exporter'
     AIRFLOW__METRICS__STATSD_PORT: '8125'
     AIRFLOW__METRICS__STATSD_PREFIX: 'airflow'
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_PASSWORD: ${REDIS_PASSWORD}
+    RECO_BANDIT_STATE_KEY_PREFIX: ${RECO_BANDIT_STATE_KEY_PREFIX:-recommend:bandit}
+    RECO_BANDIT_LOOKBACK_HOURS: ${RECO_BANDIT_LOOKBACK_HOURS:-72}
+    RECO_VALID_READ_DWELL_SECONDS: ${RECO_VALID_READ_DWELL_SECONDS:-5}
+    RECO_BANDIT_PRIOR_ALPHA: ${RECO_BANDIT_PRIOR_ALPHA:-1}
+    RECO_BANDIT_PRIOR_BETA: ${RECO_BANDIT_PRIOR_BETA:-199}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -498,6 +506,97 @@ services:
     networks:
       - news-network
     restart: always
+
+  recommend-api:
+    build:
+      context: .
+      dockerfile: dockerfile/recommend-api.Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    expose:
+      - 8000
+    ports:
+      - "18000:8000"
+    environment:
+      RECO_MODEL_VERSION: v1
+      RECO_BANDIT_ALLOCATOR: ${RECO_BANDIT_ALLOCATOR:-thompson}
+      RECO_BANDIT_BATCH_SIZE: ${RECO_BANDIT_BATCH_SIZE:-20}
+      RECO_BANDIT_MIN_ITEMS_PER_PATH: ${RECO_BANDIT_MIN_ITEMS_PER_PATH:-2}
+      RECO_BANDIT_PRIOR_ALPHA: ${RECO_BANDIT_PRIOR_ALPHA:-1}
+      RECO_BANDIT_PRIOR_BETA: ${RECO_BANDIT_PRIOR_BETA:-199}
+      RECO_BANDIT_STATE_KEY_PREFIX: ${RECO_BANDIT_STATE_KEY_PREFIX:-recommend:bandit}
+      RECO_BREAKING_REPLENISH_MIN_COUNT: ${RECO_BREAKING_REPLENISH_MIN_COUNT:-1}
+      RECO_BREAKING_STALE_CUTOFF_MINUTES: ${RECO_BREAKING_STALE_CUTOFF_MINUTES:-1440}
+      RECO_CACHE_TTL_SEC: 600
+      RECO_RERANK_PROVIDER: ${RECO_RERANK_PROVIDER:-heuristic}
+      RECO_GEMINI_MODEL: ${RECO_GEMINI_MODEL:-gemini-2.0-flash-lite}
+      RECO_RERANK_TIMEOUT_SECONDS: ${RECO_RERANK_TIMEOUT_SECONDS:-15}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      NEWS_DB_HOST: news-database
+      NEWS_DB_PORT: 5432
+      NEWS_DB_NAME: ${DATA_POSTGRES_DB_NAME}
+      NEWS_DB_USER: ${DATA_POSTGRES_USER}
+      NEWS_DB_PASSWORD: ${DATA_POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      news-database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8000/healthz" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: always
+    networks:
+      - news-network
+      - proxy-net
+
+  gnn-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_hourly_pipeline_utils.py
+      tests/test_bandit_posterior_utils.py
+      tests/test_gnn_graph_builder.py
+      tests/test_gnn_training_data_loader.py
+      tests/test_gnn_trainer_gate.py
+      tests/test_gnn_serving_deploy.py
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      DB_HOST: news-database
+      DB_PORT: 5432
+      DB_USER: ${DATA_POSTGRES_USER}
+      DB_PASS: ${DATA_POSTGRES_PASSWORD}
+      DB_NAME: ${DATA_POSTGRES_DB_NAME}
+    volumes:
+      - ./app:/app/app
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+      news-database:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - news-network
+      - proxy-net
 
 
 

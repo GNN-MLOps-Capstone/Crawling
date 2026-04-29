@@ -1,0 +1,30 @@
+[
+  {
+    "source_name": "HBM",
+    "source_type": "keyword",
+    "target_name": "삼성전자",
+    "target_type": "stock",
+    "description": "[Key->Stock] HBM 관련 뉴스에서 삼성전자가 추천되는가?"
+  },
+  {
+    "source_name": "HBM",
+    "source_type": "keyword",
+    "target_name": "SK하이닉스",
+    "target_type": "stock",
+    "description": "[Keyword->Stock] HBM 관련 뉴스에서 SK하이닉스가 추천되는가?"
+  },
+  {
+    "source_name": "반도체",
+    "source_type": "keyword",
+    "target_name": "삼성전자",
+    "target_type": "stock",
+    "description": "[Key->Stock] 반도체 관련 뉴스에서 삼성전자가 추천되는가?"
+  },
+  {
+    "source_name": "SK하이닉스",
+    "source_type": "stock",
+    "target_name": "삼성전자",
+    "target_type": "stock",
+    "description": "[Stock->Stock] 하이닉스 관련 뉴스에서 삼성전자가 추천되는가?"
+  }
+]

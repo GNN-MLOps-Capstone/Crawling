@@ -10,6 +10,8 @@ from airflow.datasets import Dataset
 from airflow.providers.docker.operators.docker import DockerOperator
 from docker.types import Mount
 
+from modules.snapshot_utils import select_latest_snapshot_on_or_before
+
 # [환경 설정]
 local_tz = pendulum.timezone("Asia/Seoul")
 MINIO_CONN_ID = 'MINIO_S3'
@@ -29,7 +31,7 @@ default_args = {
 @dag(
     dag_id='gnn_trainset_creation',
     default_args=default_args,
-    schedule_interval=None,
+    schedule='0 4 * * *',
     start_date=datetime(2025, 1, 1, tzinfo=local_tz),
     catchup=False,
     params={
@@ -43,8 +45,18 @@ default_args = {
 def trainset_pipeline():
     @task(multiple_outputs=True)
     def prepare_context(**context):
-        params = context.get('params', {})
-        target_date_str = params.get('target_date')
+        params = context.get('params', {}) or {}
+        dag_run = context.get("dag_run")
+        conf = dag_run.conf if dag_run and dag_run.conf else {}
+        scheduled_target_date = context['data_interval_end'].in_timezone('Asia/Seoul').to_date_string()
+        run_type = str(getattr(dag_run, "run_type", "")).lower()
+
+        if conf.get('target_date'):
+            target_date_str = conf['target_date']
+        elif run_type == 'scheduled':
+            target_date_str = scheduled_target_date
+        else:
+            target_date_str = params.get('target_date') or scheduled_target_date
 
         # YYYY-MM-DD -> YYYYMMDD
         dt = pendulum.parse(target_date_str)
@@ -67,7 +79,12 @@ def trainset_pipeline():
         # 2. Snapshot 찾기
         s3_hook = S3Hook(aws_conn_id=MINIO_CONN_ID)
         kw_keys = s3_hook.list_keys(bucket_name=BUCKET_NAME, prefix="keyword_embeddings/date=")
-        latest_kw_snap = max([k for k in kw_keys if "keyword_embeddings.parquet" in k]) if kw_keys else None
+        latest_kw_snap = select_latest_snapshot_on_or_before(
+            kw_keys,
+            target_date_str,
+            prefix="keyword_embeddings/date=",
+            suffix="keyword_embeddings.parquet",
+        )
 
         st_keys = s3_hook.list_keys(bucket_name=BUCKET_NAME, prefix="stock_embeddings/")
         latest_st_snap = None

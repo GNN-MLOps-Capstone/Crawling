@@ -170,6 +170,7 @@ def analysis_integration_pipeline():
     # Loading은 모든 분석 및 스냅샷 완료 후
     loaded = task_load(ctx['dates'], ctx['aws'], snapshot, pg_info)
     status_after = report_filter_status(ctx['dates'], 'after')
+
     loaded >> status_after
 
 

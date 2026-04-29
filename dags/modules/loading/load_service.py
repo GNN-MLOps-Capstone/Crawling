@@ -48,3 +48,19 @@ def run_db_loading(targets: list, snapshot_path: str, aws_info: dict, pg_info: d
             kw_loader.load_mappings(s3, 'silver', target['keywords'])
 
     return "Done"
+
+
+def run_incremental_db_loading(target: dict, aws_info: dict, pg_info: dict, snapshot_path: str = None):
+    label = target.get('window_label') or target.get('date') or 'incremental'
+    return run_db_loading(
+        targets=[{
+            "date": label,
+            "refined": target.get("refined"),
+            "stocks": target.get("stocks"),
+            "keywords": target.get("keywords"),
+            "analysis": target.get("analysis"),
+        }],
+        snapshot_path=snapshot_path,
+        aws_info=aws_info,
+        pg_info=pg_info,
+    )

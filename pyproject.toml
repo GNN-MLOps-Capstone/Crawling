@@ -5,3 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "api: recommend-api tests",
+    "module: DAG module and shared utility tests",
+    "gnn: GNN training and serving tests",
+]

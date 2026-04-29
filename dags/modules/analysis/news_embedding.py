@@ -1,6 +1,4 @@
 import pandas as pd
-from ollama import Client
-from tqdm import tqdm
 
 
 def add_embeddings_to_df(df: pd.DataFrame,
@@ -11,6 +9,9 @@ def add_embeddings_to_df(df: pd.DataFrame,
     """
     if df.empty or 'refined_text' not in df.columns:
         return df
+
+    from ollama import Client
+    from tqdm import tqdm
 
     client = Client(host=host)
     embeddings = []
