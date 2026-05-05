@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 
 import pendulum
@@ -11,10 +12,20 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 local_tz = pendulum.timezone("Asia/Seoul")
 POSTGRES_CONN_ID = "news_data_db"
 
+
+def _parse_email_list(value: str) -> list[str]:
+    return [email.strip() for email in value.split(",") if email.strip()]
+
+
+HEALTHCHECK_ALERT_EMAILS = _parse_email_list(os.getenv("AIRFLOW_HEALTHCHECK_ALERT_EMAILS", ""))
+
 default_args = {
     "owner": "dongbin",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
+    "email": HEALTHCHECK_ALERT_EMAILS,
+    "email_on_failure": bool(HEALTHCHECK_ALERT_EMAILS),
+    "email_on_retry": False,
 }
 
 REQUIRED_COLUMNS = {

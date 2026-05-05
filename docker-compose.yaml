@@ -67,6 +67,15 @@ x-airflow-common:
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__EMAIL__EMAIL_BACKEND: airflow.utils.email.send_email_smtp
+    AIRFLOW__SMTP__SMTP_HOST: smtp.resend.com
+    AIRFLOW__SMTP__SMTP_PORT: '465'
+    AIRFLOW__SMTP__SMTP_SSL: 'True'
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'False'
+    AIRFLOW__SMTP__SMTP_USER: resend
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${RESEND_API_KEY:-}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW_SMTP_MAIL_FROM:-}
+    AIRFLOW_CONN_SMTP_DEFAULT: '{"conn_type":"smtp","host":"smtp.resend.com","port":465,"login":"resend","password":"${RESEND_API_KEY:-}","extra":{"from_email":"${AIRFLOW_SMTP_MAIL_FROM:-}"}}'
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
@@ -85,6 +94,7 @@ x-airflow-common:
     RECO_VALID_READ_DWELL_SECONDS: ${RECO_VALID_READ_DWELL_SECONDS:-5}
     RECO_BANDIT_PRIOR_ALPHA: ${RECO_BANDIT_PRIOR_ALPHA:-1}
     RECO_BANDIT_PRIOR_BETA: ${RECO_BANDIT_PRIOR_BETA:-199}
+    AIRFLOW_HEALTHCHECK_ALERT_EMAILS: ${AIRFLOW_HEALTHCHECK_ALERT_EMAILS:-}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs

@@ -11,6 +11,7 @@
 - Connection: `news_data_db`
 - 실행 방식: read-only `SELECT`
 - 생성 시 paused 상태: `False`
+- 실패 알림: `AIRFLOW_HEALTHCHECK_ALERT_EMAILS`가 설정된 경우 email 발송
 
 ## 목적
 
@@ -50,6 +51,21 @@ Warning:
 - metrics freshness 지연
 
 `fail_on_stale=true` param으로 freshness warning도 hard fail로 승격할 수 있다.
+
+## Email Alert
+
+`operational_health_check_daily` DAG는 task 실패 시 Airflow 기본 email alert를 사용한다.
+수신자는 `.env`의 `AIRFLOW_HEALTHCHECK_ALERT_EMAILS`에 설정한다.
+
+```env
+AIRFLOW_HEALTHCHECK_ALERT_EMAILS=ops@example.com,team@example.com
+```
+
+- 값이 비어 있으면 healthcheck DAG 실패 email alert는 비활성화된다.
+- 여러 수신자는 comma로 구분한다.
+- SMTP는 `docker-compose.yaml`의 Airflow 공통 환경변수에서 Resend 기준으로 설정한다.
+- 필요한 SMTP 환경변수는 `.env.example`의 `RESEND_API_KEY`, `AIRFLOW_SMTP_MAIL_FROM`, `AIRFLOW_HEALTHCHECK_ALERT_EMAILS`를 참고한다.
+- `.env` 변경 후에는 Airflow scheduler/worker가 새 환경변수를 읽도록 컨테이너를 재시작한다.
 
 ## Params
 

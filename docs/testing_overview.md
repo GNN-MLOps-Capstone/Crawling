@@ -205,6 +205,7 @@ docker compose run --rm live-readonly-test
 - `operational_health_check_daily` DAG가 매일 KST 04:30 실행된다.
 - DAG는 `news_data_db`에 read-only query로 접근한다.
 - freshness 지연은 기본적으로 warning으로 요약되고, `fail_on_stale=true` param으로 hard fail로 승격할 수 있다.
+- `AIRFLOW_HEALTHCHECK_ALERT_EMAILS`가 설정되어 있으면 healthcheck DAG task 실패 시 email alert가 발송된다.
 
 ## 영역별로 보는 것
 
@@ -356,6 +357,7 @@ docker compose run --rm live-readonly-test
 - 대상: `dags/operational_health_check_daily_dag.py`
 - 목적: 운영 freshness, snapshot, metrics, embedding 상태를 Airflow에서 정기 점검
 - 실행: Airflow DAG `operational_health_check_daily`, 매일 KST 04:30
+- 알림: `.env`의 `AIRFLOW_HEALTHCHECK_ALERT_EMAILS`로 실패 email 수신자 설정
 
 </details>
 
