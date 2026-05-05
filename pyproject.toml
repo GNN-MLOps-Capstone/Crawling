@@ -13,4 +13,6 @@ markers = [
     "api: recommend-api tests",
     "module: DAG module and shared utility tests",
     "gnn: GNN training and serving tests",
+    "live_db: opt-in live database checks",
+    "readonly: read-only live checks",
 ]

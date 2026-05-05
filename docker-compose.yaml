@@ -572,6 +572,7 @@ services:
       tests/test_gnn_training_data_loader.py
       tests/test_gnn_trainer_gate.py
       tests/test_gnn_serving_deploy.py
+      tests/test_gnn_baseline_eval.py
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
@@ -594,6 +595,87 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+    networks:
+      - news-network
+      - proxy-net
+
+  dag-wiring-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_airflow_task_wiring.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  workflow-contract-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_workflow_contracts.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  offline-artifact-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_offline_file_artifacts.py
+      tests/test_offline_db_artifacts.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  live-readonly-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/live
+      -m
+      "live_db and readonly"
+    environment:
+      ALLOW_LIVE_READONLY_TESTS: ${ALLOW_LIVE_READONLY_TESTS:-}
+      LIVE_DB_DSN: ${LIVE_DB_DSN:-}
+      LIVE_DB_HOST: ${LIVE_DB_HOST:-}
+      LIVE_DB_PORT: ${LIVE_DB_PORT:-5432}
+      LIVE_DB_NAME: ${LIVE_DB_NAME:-}
+      LIVE_DB_USER: ${LIVE_DB_USER:-}
+      LIVE_DB_PASSWORD: ${LIVE_DB_PASSWORD:-}
+    volumes:
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
     networks:
       - news-network
       - proxy-net
