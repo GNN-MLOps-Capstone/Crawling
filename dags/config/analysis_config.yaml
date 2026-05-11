@@ -30,7 +30,7 @@ post_gemini_filter:
   filter_reason: "post_gemini_unmapped_keyword_rule"
 
 gemini:
-  model_name: "gemini-2.0-flash-lite"
+  model_name: "gemini-2.5-flash-lite"
   temperature: 0.3
   max_retries: 4
 

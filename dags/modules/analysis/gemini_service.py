@@ -30,7 +30,29 @@ class GeminiNewsAnalyzer:
         self.gen_config = types.GenerateContentConfig(
             temperature=self.config['gemini']['temperature'],
             system_instruction=self.config['gemini']['system_prompt'],
-            response_mime_type="application/json"
+            response_mime_type="application/json",
+            response_json_schema={
+                "type": "object",
+                "properties": {
+                    "related_stocks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 3,
+                        "maxItems": 6,
+                    },
+                    "summary": {"type": "string"},
+                    "sentiment": {
+                        "type": "string",
+                        "enum": ["긍정", "중립", "부정"],
+                    },
+                },
+                "required": ["related_stocks", "keywords", "summary", "sentiment"],
+                "additionalProperties": False,
+            },
         )
 
     def _bulk_update_filter_status(self, news_ids, status, reason):
@@ -55,6 +77,13 @@ class GeminiNewsAnalyzer:
     def _extract_valid_analysis(self, res: dict):
         if not isinstance(res, dict):
             return None, None
+
+        if not (res.get('summary') or res.get('sentiment')):
+            for nested_key in ('analysis', 'result', 'data'):
+                nested = res.get(nested_key)
+                if isinstance(nested, dict) and (nested.get('summary') or nested.get('sentiment')):
+                    res = nested
+                    break
 
         summary = res.get('summary')
         sentiment = res.get('sentiment')
