@@ -49,7 +49,9 @@ class RetrievalService:
         *,
         context: NormalizedRecommendContext,
         exclude_ids: set[int],
+        exposure_penalties: dict[int, float] | None = None,
     ) -> RetrievalResult:
+        exposure_penalties = exposure_penalties or {}
         base_pool_limit = self._base_pool_limit()
         breaking_hours = min(self.breaking_hours, self.base_pool_hours)
         onboarding: list[NewsCandidate] = []
@@ -144,10 +146,10 @@ class RetrievalService:
 
         if onboarding or behavior:
             return RetrievalResult(
-                onboarding=onboarding,
-                behavior=behavior,
-                breaking=breaking,
-                popular=popular,
+                onboarding=self._apply_exposure_penalties(onboarding, exposure_penalties),
+                behavior=self._apply_exposure_penalties(behavior, exposure_penalties),
+                breaking=self._apply_exposure_penalties(breaking, exposure_penalties),
+                popular=self._apply_exposure_penalties(popular, exposure_penalties),
                 fallback_used=onboarding_failed or behavior_failed or breaking_failed or popular_failed,
                 fallback_reason=self._fallback_reason(
                     onboarding_failed=onboarding_failed,
@@ -167,16 +169,16 @@ class RetrievalService:
                 return RetrievalResult(
                     onboarding=[],
                     behavior=[],
-                    breaking=breaking,
-                    popular=popular,
+                    breaking=self._apply_exposure_penalties(breaking, exposure_penalties),
+                    popular=self._apply_exposure_penalties(popular, exposure_penalties),
                     fallback_used=False,
                     fallback_reason=None,
                 )
             return RetrievalResult(
                 onboarding=[],
                 behavior=[],
-                breaking=breaking,
-                popular=popular,
+                breaking=self._apply_exposure_penalties(breaking, exposure_penalties),
+                popular=self._apply_exposure_penalties(popular, exposure_penalties),
                 fallback_used=True,
                 fallback_reason="primary_failed_use_exploration",
             )
@@ -185,6 +187,7 @@ class RetrievalService:
             latest = self.repository.fetch_latest_news_ids(
                 limit=self.onboarding_limit + self.behavior_limit + self.breaking_limit,
                 offset=0,
+                exclude_ids=exclude_ids,
             )
             onboarding = [
                 NewsCandidate(
@@ -198,7 +201,7 @@ class RetrievalService:
                 for news_id in latest
             ]
             return RetrievalResult(
-                onboarding=onboarding,
+                onboarding=self._apply_exposure_penalties(onboarding, exposure_penalties),
                 behavior=[],
                 breaking=[],
                 popular=[],
@@ -236,6 +239,31 @@ class RetrievalService:
         if behavior_insufficient:
             return "behavior_insufficient"
         return None
+
+    @staticmethod
+    def _apply_exposure_penalties(
+        candidates: list[NewsCandidate],
+        exposure_penalties: dict[int, float],
+    ) -> list[NewsCandidate]:
+        if not candidates or not exposure_penalties:
+            return candidates
+
+        total = len(candidates)
+
+        def rank_key(indexed_candidate: tuple[int, NewsCandidate]) -> tuple[float, int]:
+            index, candidate = indexed_candidate
+            base_score = candidate.score if candidate.score is not None else float(total - index)
+            multiplier = exposure_penalties.get(candidate.news_id, 1.0)
+            return base_score * multiplier, -index
+
+        return [
+            candidate
+            for _, candidate in sorted(
+                enumerate(candidates),
+                key=rank_key,
+                reverse=True,
+            )
+        ]
 
     def _score_onboarding_candidates(
         self,

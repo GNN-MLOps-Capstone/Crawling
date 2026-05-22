@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api.recommend import get_recommend_service
 from app.main import app
-from app.repositories.news_repository import NewsCandidate, NewsRepository
+from app.repositories.news_repository import NewsCandidate, NewsRepository, ServedNewsStats
 from app.schemas.recommend import RecommendNewsRequest
 import app.services.recommend_service as recommend_service_module
 from app.services.context_builder import RecommendContextBuilder
@@ -24,10 +24,14 @@ class FakeNewsRepository:
         *,
         profiles_by_user_id: dict[int, dict[str, list[str]]] | None = None,
         actions_by_user_id: dict[int, list[dict[str, object]]] | None = None,
+        read_news_ids_by_user_id: dict[int, set[int]] | None = None,
+        served_news_by_user_id: dict[int, dict[int, ServedNewsStats]] | None = None,
     ) -> None:
         self.news_ids = news_ids
         self.profiles_by_user_id = profiles_by_user_id or {}
         self.actions_by_user_id = actions_by_user_id or {}
+        self.read_news_ids_by_user_id = read_news_ids_by_user_id or {}
+        self.served_news_by_user_id = served_news_by_user_id or {}
         self.news_entities_by_id: dict[int, dict[str, list[str]]] = {}
         self.entity_embeddings: dict[tuple[str, str], list[float]] = {}
         self.fetch_recent_candidates_calls: list[dict[str, object]] = []
@@ -46,6 +50,26 @@ class FakeNewsRepository:
         del dwell_threshold_seconds
         return self.actions_by_user_id.get(user_id, [])[:limit]
 
+    def fetch_read_news_ids(
+        self,
+        *,
+        user_id: int,
+        days: int,
+        limit: int,
+        dwell_threshold_seconds: int,
+    ) -> set[int]:
+        del days, dwell_threshold_seconds
+        return set(list(self.read_news_ids_by_user_id.get(user_id, set()))[:limit])
+
+    def fetch_recent_served_news(
+        self,
+        *,
+        user_id: int,
+        window_hours: int,
+    ) -> dict[int, ServedNewsStats]:
+        del window_hours
+        return dict(self.served_news_by_user_id.get(user_id, {}))
+
     def fetch_news_entities(self, *, news_ids: list[int]) -> dict[int, dict[str, list[str]]]:
         return {
             news_id: self.news_entities_by_id.get(news_id, {"keyword_ids": [], "stock_ids": []})
@@ -63,8 +87,15 @@ class FakeNewsRepository:
             if entity_ref in self.entity_embeddings
         }
 
-    def fetch_latest_news_ids(self, *, limit: int, offset: int) -> list[int]:
-        return self.news_ids[offset : offset + limit]
+    def fetch_latest_news_ids(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        exclude_ids: set[int] | None = None,
+    ) -> list[int]:
+        exclude_ids = exclude_ids or set()
+        return [news_id for news_id in self.news_ids if news_id not in exclude_ids][offset : offset + limit]
 
     def fetch_recent_candidates(
         self,
@@ -213,6 +244,121 @@ def test_cursor_limit_mismatch_returns_400() -> None:
     assert second.status_code == 400
     detail = second.json()["detail"]["error"]
     assert detail["code"] == "INVALID_CURSOR"
+
+
+def test_force_refresh_rebuilds_request_session() -> None:
+    repository = FakeNewsRepository([10, 9, 8])
+    service = RecommendService(
+        repository=repository,
+        session_cache=InMemorySessionCache(),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=50,
+            behavior_limit=50,
+            breaking_limit=30,
+            popular_limit=30,
+        ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
+    )
+
+    first = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, request_id="refresh-1", context={}))
+    repository.news_ids = [7, 6, 5]
+    cached = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, request_id="refresh-1", context={}))
+    refreshed = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=2, request_id="refresh-1", force_refresh=True, context={})
+    )
+
+    assert [item.news_id for item in first.items] == [10, 9]
+    assert [item.news_id for item in cached.items] == [10, 9]
+    assert [item.news_id for item in refreshed.items] == [7, 6]
+
+
+def test_force_refresh_with_cursor_returns_400() -> None:
+    client = _client_with_ids([10, 9, 8, 7])
+
+    first = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+    assert first.status_code == 200
+
+    response = client.post(
+        "/recommend/news",
+        json={"user_id": 1, "limit": 2, "cursor": first.json()["next_cursor"], "force_refresh": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "INVALID_CURSOR"
+
+
+def test_read_news_ids_are_excluded_from_recommendations() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [10, 9, 8, 7],
+            read_news_ids_by_user_id={1: {10, 9}},
+        )
+    )
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+
+    assert response.status_code == 200
+    assert [item["news_id"] for item in response.json()["items"]] == [8, 7]
+
+
+def test_recently_served_news_ids_are_excluded_during_cooldown() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [10, 9, 8],
+            served_news_by_user_id={
+                1: {
+                    10: ServedNewsStats(
+                        news_id=10,
+                        last_served_at=datetime.now(UTC),
+                        serve_count=1,
+                    )
+                }
+            },
+        )
+    )
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+
+    assert response.status_code == 200
+    assert [item["news_id"] for item in response.json()["items"]] == [9, 8]
+
+
+def test_served_news_outside_cooldown_is_demoted_not_excluded() -> None:
+    client = _client_with_repository(
+        FakeNewsRepository(
+            [10, 9, 8],
+            served_news_by_user_id={
+                1: {
+                    10: ServedNewsStats(
+                        news_id=10,
+                        last_served_at=datetime.now(UTC) - timedelta(hours=2),
+                        serve_count=3,
+                    )
+                }
+            },
+        )
+    )
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 3})
+
+    assert response.status_code == 200
+    assert [item["news_id"] for item in response.json()["items"]] == [9, 8, 10]
 
 
 def test_pagination_consistency_with_cursor() -> None:

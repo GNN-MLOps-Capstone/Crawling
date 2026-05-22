@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 
 from app.core.config import settings
@@ -44,13 +45,16 @@ class RecommendService:
         offset = 0
         cache_status = "miss"
 
+        if request.force_refresh and request.cursor:
+            raise CursorError("force_refresh cannot be used with cursor")
+
         if request.cursor:
             payload = decode_cursor(request.cursor)
             self._validate_cursor(payload=payload, request=request)
             request_id = payload.request_id
             offset = payload.offset
 
-        session = self.session_cache.get(request_id)
+        session = None if request.force_refresh else self.session_cache.get(request_id)
         if session is None and request.cursor:
             raise CursorError("session not found for cursor")
         if session is None:
@@ -151,7 +155,16 @@ class RecommendService:
             raw_context=request.context,
             repository=self.repository,
         )
-        retrieval = self.retrieval_service.retrieve(context=context, exclude_ids=exclude_ids or set())
+        suppression = self._build_suppression_policy(
+            user_id=request.user_id,
+            context=context,
+            exclude_ids=exclude_ids or set(),
+        )
+        retrieval = self.retrieval_service.retrieve(
+            context=context,
+            exclude_ids=suppression["exclude_ids"],
+            exposure_penalties=suppression["exposure_penalties"],
+        )
 
         mix_plan = self.bandit_service.build_mix_plan(
             path_candidates={
@@ -174,7 +187,11 @@ class RecommendService:
         fallback_reason = self._resolve_fallback_reason(context=context, retrieval_fallback_reason=retrieval.fallback_reason)
 
         if not timeline_ids:
-            timeline_ids = self.repository.fetch_latest_news_ids(limit=request.limit, offset=0)
+            timeline_ids = self.repository.fetch_latest_news_ids(
+                limit=request.limit,
+                offset=0,
+                exclude_ids=suppression["exclude_ids"],
+            )
             source = "latest_fallback"
             fallback_used = True
             fallback_reason = fallback_reason or "empty_result"
@@ -249,7 +266,16 @@ class RecommendService:
             raw_context=session.debug_context,
             repository=self.repository,
         )
-        retrieval = self.retrieval_service.retrieve(context=context, exclude_ids=set(session.timeline_ids))
+        suppression = self._build_suppression_policy(
+            user_id=session.user_id,
+            context=context,
+            exclude_ids=set(session.timeline_ids),
+        )
+        retrieval = self.retrieval_service.retrieve(
+            context=context,
+            exclude_ids=suppression["exclude_ids"],
+            exposure_penalties=suppression["exposure_penalties"],
+        )
         mix_plan = self.bandit_service.build_mix_plan(
             path_candidates={
                 "onboarding": [item.news_id for item in retrieval.onboarding],
@@ -370,6 +396,72 @@ class RecommendService:
             )
         )
 
+    def _build_suppression_policy(
+        self,
+        *,
+        user_id: int,
+        context,
+        exclude_ids: set[int],
+    ) -> dict[str, object]:
+        hard_exclude_ids = set(exclude_ids)
+        hard_exclude_ids.update(self._read_news_ids(user_id=user_id, context=context))
+        exposure_penalties: dict[int, float] = {}
+
+        served_stats = self._recent_served_news(user_id=user_id)
+        now = datetime.now(UTC)
+        for news_id, stats in served_stats.items():
+            last_served_at = self._aware_datetime(getattr(stats, "last_served_at", None))
+            serve_count = int(getattr(stats, "serve_count", 0) or 0)
+            if last_served_at is None or serve_count <= 0:
+                continue
+            age_seconds = (now - last_served_at).total_seconds()
+            if age_seconds <= max(settings.exposure_cooldown_seconds, 0):
+                hard_exclude_ids.add(news_id)
+                continue
+            exposure_penalties[news_id] = max(
+                settings.exposure_penalty_min_multiplier,
+                1.0 - (serve_count * settings.exposure_penalty_per_impression),
+            )
+
+        return {
+            "exclude_ids": hard_exclude_ids,
+            "exposure_penalties": exposure_penalties,
+        }
+
+    def _read_news_ids(self, *, user_id: int, context) -> set[int]:
+        read_ids = {
+            int(action["news_id"])
+            for action in context.recent_actions
+            if isinstance(action, dict) and isinstance(action.get("news_id"), int)
+        }
+        if settings.read_exclude_days <= 0 or settings.read_exclude_limit <= 0:
+            return read_ids
+
+        try:
+            read_ids.update(
+                self.repository.fetch_read_news_ids(
+                    user_id=user_id,
+                    days=settings.read_exclude_days,
+                    limit=settings.read_exclude_limit,
+                    dwell_threshold_seconds=settings.valid_read_dwell_seconds,
+                )
+            )
+        except Exception as exc:
+            logger.warning("read news suppression lookup failed for user_id=%s: %s", user_id, exc)
+        return read_ids
+
+    def _recent_served_news(self, *, user_id: int) -> dict[int, object]:
+        if settings.exposure_penalty_window_hours <= 0:
+            return {}
+        try:
+            return self.repository.fetch_recent_served_news(
+                user_id=user_id,
+                window_hours=settings.exposure_penalty_window_hours,
+            )
+        except Exception as exc:
+            logger.warning("served news suppression lookup failed for user_id=%s: %s", user_id, exc)
+            return {}
+
     def _log_impressions(
         self,
         *,
@@ -428,6 +520,14 @@ class RecommendService:
         if source.endswith("_cold"):
             return "cold"
         return "fallback"
+
+    @staticmethod
+    def _aware_datetime(value: object) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _request_context_payload(request: RecommendNewsRequest) -> dict[str, object]:

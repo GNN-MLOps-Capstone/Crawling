@@ -21,7 +21,99 @@ class NewsCandidate:
     snapshot_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class ServedNewsStats:
+    news_id: int
+    last_served_at: datetime
+    serve_count: int
+
+
 class NewsRepository:
+    def fetch_read_news_ids(
+        self,
+        *,
+        user_id: int,
+        days: int,
+        limit: int,
+        dwell_threshold_seconds: int,
+    ) -> set[int]:
+        query = """
+            WITH opens AS (
+                SELECT
+                    ie.news_id,
+                    MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS open_ts,
+                    ie.content_session_id
+                FROM public.interaction_events ie
+                WHERE ie.user_id IS NOT NULL
+                  AND ie.user_id::integer = %s
+                  AND ie.event_type = 'content_open'
+                  AND ie.news_id IS NOT NULL
+                  AND ie.event_ts_server >= now() - (%s::text || ' days')::interval
+                GROUP BY ie.news_id, ie.content_session_id
+            ),
+            leaves AS (
+                SELECT
+                    ie.content_session_id,
+                    MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS leave_ts
+                FROM public.interaction_events ie
+                WHERE ie.user_id IS NOT NULL
+                  AND ie.user_id::integer = %s
+                  AND ie.event_type = 'content_leave'
+                  AND ie.content_session_id IS NOT NULL
+                  AND ie.event_ts_server >= now() - (%s::text || ' days')::interval
+                GROUP BY ie.content_session_id
+            )
+            SELECT o.news_id
+            FROM opens o
+            JOIN leaves l ON l.content_session_id = o.content_session_id
+            WHERE EXTRACT(EPOCH FROM (l.leave_ts - o.open_ts)) >= %s
+            GROUP BY o.news_id
+            ORDER BY MAX(o.open_ts) DESC
+            LIMIT %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, days, user_id, days, dwell_threshold_seconds, limit))
+                rows = cur.fetchall()
+        return {int(row[0]) for row in rows}
+
+    def fetch_recent_served_news(
+        self,
+        *,
+        user_id: int,
+        window_hours: int,
+    ) -> dict[int, ServedNewsStats]:
+        query = """
+            SELECT
+                (item ->> 'news_id')::bigint AS news_id,
+                MAX(rs.created_at) AS last_served_at,
+                COUNT(*)::bigint AS serve_count
+            FROM public.recommendation_serves rs
+            CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item
+            WHERE rs.user_id IS NOT NULL
+              AND rs.user_id::integer = %s
+              AND rs.created_at >= now() - (%s::text || ' hours')::interval
+              AND item ? 'news_id'
+              AND (item ->> 'news_id') ~ '^[0-9]+$'
+            GROUP BY (item ->> 'news_id')::bigint
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, window_hours))
+                rows = cur.fetchall()
+
+        return {
+            int(news_id): ServedNewsStats(
+                news_id=int(news_id),
+                last_served_at=last_served_at,
+                serve_count=int(serve_count or 0),
+            )
+            for news_id, last_served_at, serve_count in rows
+            if last_served_at is not None
+        }
+
     def fetch_popular_candidates(
         self,
         *,
@@ -184,7 +276,14 @@ class NewsRepository:
             )
         return actions
 
-    def fetch_latest_news_ids(self, *, limit: int, offset: int) -> list[int]:
+    def fetch_latest_news_ids(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        exclude_ids: set[int] | None = None,
+    ) -> list[int]:
+        exclude_ids = exclude_ids or set()
         query = """
             SELECT fn.news_id
             FROM filtered_news fn
@@ -195,9 +294,17 @@ class NewsRepository:
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (limit, offset))
+                cur.execute(query, (limit * 4, offset))
                 rows = cur.fetchall()
-        return [int(row[0]) for row in rows]
+        latest_ids: list[int] = []
+        for row in rows:
+            news_id = int(row[0])
+            if news_id in exclude_ids:
+                continue
+            latest_ids.append(news_id)
+            if len(latest_ids) >= limit:
+                break
+        return latest_ids
 
     def fetch_news_entities(self, *, news_ids: list[int]) -> dict[int, dict[str, list[str]]]:
         if not news_ids:
