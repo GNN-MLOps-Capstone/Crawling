@@ -2,6 +2,9 @@ global:
   scrape_interval: 15s      # 15초마다 데이터 수집
   evaluation_interval: 15s  # 규칙 평가 주기 (알람 설정 시 사용)
 
+rule_files:
+  - /etc/prometheus/rules.yaml
+
 scrape_configs:
   # 1. Prometheus 자체 모니터링 (자기 자신 상태 확인)
   - job_name: 'prometheus'
@@ -13,3 +16,9 @@ scrape_configs:
   - job_name: 'airflow-statsd'
     static_configs:
       - targets: ['airflow-statsd-exporter:9102']
+
+  # 3. Recommend API metrics
+  - job_name: 'recommend-api'
+    metrics_path: /metrics/
+    static_configs:
+      - targets: ['recommend-api:8000']

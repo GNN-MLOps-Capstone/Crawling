@@ -28,6 +28,8 @@ class RecommendationSession:
     fallback_used: bool = False
     fallback_reason: str | None = None
     source: str = "multipath_mixed"
+    experiment_id: str = "control"
+    variant: str = "recommend"
     prefetch_triggered: bool = False
     prefetch_status: str = "idle"
     prefetch_trigger_path: str | None = None

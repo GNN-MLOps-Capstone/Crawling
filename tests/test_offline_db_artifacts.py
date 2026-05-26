@@ -135,3 +135,17 @@ def test_recommendation_snapshot_sql_files_expose_downstream_contract_columns() 
     assert "items" in path_a2_sql
     assert "snapshot_at" in path_a2_sql
     assert "ON CONFLICT (user_id)" in path_a2_sql
+
+
+def test_recommendation_experiment_schema_migration_adds_assignment_columns() -> None:
+    migration_sql = (REPO_ROOT / "dags/sql/migrate_recommendation_experiment_columns.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ALTER TABLE public.recommendation_serves" in migration_sql
+    assert "ADD COLUMN IF NOT EXISTS experiment_id" in migration_sql
+    assert "ADD COLUMN IF NOT EXISTS variant" in migration_sql
+    assert "set_recommendation_serve_experiment_assignment" in migration_sql
+    assert "tr_recommendation_serves_experiment_assignment" in migration_sql
+    assert "UPDATE public.recommendation_serves" in migration_sql
+    assert "ix_recommendation_serves_experiment_variant_created_at" in migration_sql

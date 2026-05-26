@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
 
@@ -15,6 +15,8 @@ from app.schemas.recommend import (
     RecommendNewsResponse,
 )
 from app.services.context_builder import RecommendContextBuilder
+from app.services.experiment_service import ExperimentAssignment, ExperimentService
+from app.services.metrics import record_recommend_success, set_experiment_labels
 from app.services.cursor_service import CursorError, CursorPayload, decode_cursor, encode_cursor
 from app.services.bandit_service import BanditService
 from app.services.recommend_logging import (
@@ -38,12 +40,14 @@ class RecommendService:
     context_builder: RecommendContextBuilder
     retrieval_service: RetrievalService
     bandit_service: BanditService
+    experiment_service: ExperimentService = field(default_factory=ExperimentService)
 
     def recommend_news(self, request: RecommendNewsRequest) -> RecommendNewsResponse:
         started_at = perf_counter()
         request_id = request.request_id or str(uuid.uuid4())
         offset = 0
         cache_status = "miss"
+        assignment: ExperimentAssignment | None = None
 
         if request.force_refresh and request.cursor:
             raise CursorError("force_refresh cannot be used with cursor")
@@ -58,7 +62,12 @@ class RecommendService:
         if session is None and request.cursor:
             raise CursorError("session not found for cursor")
         if session is None:
-            session = self._build_session(request=request, request_id=request_id)
+            assignment = self.experiment_service.assign(
+                user_id=request.user_id,
+                eligible=self._is_experiment_eligible(user_id=request.user_id),
+            )
+            set_experiment_labels(experiment_id=assignment.experiment_id, variant=assignment.variant)
+            session = self._build_session(request=request, request_id=request_id, assignment=assignment)
         elif session.limit != request.limit:
             raise CursorError("session.limit must equal request.limit")
         elif self._is_stale_session(session):
@@ -71,8 +80,10 @@ class RecommendService:
         else:
             cache_status = "hit"
 
+        set_experiment_labels(experiment_id=session.experiment_id, variant=session.variant)
         self._maybe_prefetch(session=session)
         session = self._ensure_page_window(session=session, request=request, offset=offset)
+        set_experiment_labels(experiment_id=session.experiment_id, variant=session.variant)
 
         total = len(session.timeline_ids) + len(
             [news_id for news_id in session.prefetched_timeline_ids if news_id not in set(session.timeline_ids)]
@@ -124,22 +135,38 @@ class RecommendService:
             selected_ids=selected_ids,
         )
 
-        return RecommendNewsResponse(
+        public_paths = [
+            self._public_path(session.timeline_path_map.get(news_id, "unknown"))
+            for news_id in selected_ids
+        ]
+        response = RecommendNewsResponse(
             request_id=request_id,
             items=[
-                RecommendNewsItem(
-                    news_id=news_id,
-                    path=self._public_path(session.timeline_path_map.get(news_id, "unknown")),
-                )
-                for news_id in selected_ids
+                RecommendNewsItem(news_id=news_id, path=path)
+                for news_id, path in zip(selected_ids, public_paths, strict=False)
             ],
             next_cursor=next_cursor,
             meta=RecommendNewsMeta(
                 source=session.source,
                 fallback_used=session.fallback_used,
                 fallback_reason=session.fallback_reason,
+                experiment_id=session.experiment_id,
+                variant=session.variant,
             ),
         )
+        record_recommend_success(
+            user_state=self._user_state_from_source(session.source),
+            cache_status=cache_status,
+            latency_seconds=perf_counter() - started_at,
+            item_count=len(selected_ids),
+            fallback_used=session.fallback_used,
+            fallback_reason=session.fallback_reason,
+            item_paths=public_paths,
+            prefetch_status=session.prefetch_status,
+            prefetch_trigger_path=session.prefetch_trigger_path,
+            session_event=self._session_event(cache_status=cache_status, prefetch_status=session.prefetch_status),
+        )
+        return response
 
     def _build_session(
         self,
@@ -149,7 +176,12 @@ class RecommendService:
         exclude_ids: set[int] | None = None,
         served_prefix_ids: list[int] | None = None,
         served_prefix_path_map: dict[int, str] | None = None,
+        assignment: ExperimentAssignment | None = None,
     ) -> RecommendationSession:
+        assignment = assignment or self.experiment_service.assign(
+            user_id=request.user_id,
+            eligible=self._is_experiment_eligible(user_id=request.user_id),
+        )
         context = self.context_builder.build(
             user_id=request.user_id,
             raw_context=request.context,
@@ -160,6 +192,37 @@ class RecommendService:
             context=context,
             exclude_ids=exclude_ids or set(),
         )
+        if assignment.strategy == "latest":
+            return self._build_latest_session(
+                request=request,
+                request_id=request_id,
+                context=context,
+                exclude_ids=suppression["exclude_ids"],
+                assignment=assignment,
+                served_prefix_ids=served_prefix_ids,
+                served_prefix_path_map=served_prefix_path_map,
+            )
+        if assignment.strategy == "popular":
+            return self._build_popular_session(
+                request=request,
+                request_id=request_id,
+                context=context,
+                exclude_ids=suppression["exclude_ids"],
+                assignment=assignment,
+                served_prefix_ids=served_prefix_ids,
+                served_prefix_path_map=served_prefix_path_map,
+            )
+        if assignment.strategy == "random":
+            return self._build_random_session(
+                request=request,
+                request_id=request_id,
+                context=context,
+                exclude_ids=suppression["exclude_ids"],
+                assignment=assignment,
+                served_prefix_ids=served_prefix_ids,
+                served_prefix_path_map=served_prefix_path_map,
+            )
+
         retrieval = self.retrieval_service.retrieve(
             context=context,
             exclude_ids=suppression["exclude_ids"],
@@ -211,12 +274,182 @@ class RecommendService:
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             source=source,
+            experiment_id=assignment.experiment_id,
+            variant=assignment.variant,
             timeline_path_map=timeline_path_map,
             debug_context=self._request_context_payload(request),
             cache_key=self._cache_key(request_id),
         )
         self.session_cache.set(request_id, session, settings.session_cache_ttl_seconds)
         return session
+
+    def _build_latest_session(
+        self,
+        *,
+        request: RecommendNewsRequest,
+        request_id: str,
+        context,
+        exclude_ids: set[int],
+        assignment: ExperimentAssignment,
+        served_prefix_ids: list[int] | None,
+        served_prefix_path_map: dict[int, str] | None,
+    ) -> RecommendationSession:
+        prefix_ids = served_prefix_ids or []
+        prefix_path_map = served_prefix_path_map or {}
+        candidate_limit = max(settings.default_limit_max, request.limit)
+        latest_ids = self.repository.fetch_latest_news_ids(
+            limit=candidate_limit,
+            offset=0,
+            exclude_ids=exclude_ids | set(prefix_ids),
+        )
+        timeline_ids = prefix_ids + latest_ids
+        timeline_path_map = {
+            **prefix_path_map,
+            **{news_id: "latest" for news_id in latest_ids},
+        }
+        return RecommendationSession(
+            request_id=request_id,
+            user_id=request.user_id,
+            limit=request.limit,
+            timeline_ids=timeline_ids,
+            onboarding_queue=[],
+            behavior_queue=[],
+            breaking_queue=[],
+            popular_queue=[],
+            current_mix_policy={"latest": len(latest_ids)},
+            mix_allocator="ab_baseline",
+            fallback_used=False,
+            fallback_reason=None,
+            source=f"ab_latest_{context.user_state}",
+            experiment_id=assignment.experiment_id,
+            variant=assignment.variant,
+            timeline_path_map=timeline_path_map,
+            debug_context=self._request_context_payload(request),
+            cache_key=self._cache_key(request_id),
+        )
+
+    def _build_popular_session(
+        self,
+        *,
+        request: RecommendNewsRequest,
+        request_id: str,
+        context,
+        exclude_ids: set[int],
+        assignment: ExperimentAssignment,
+        served_prefix_ids: list[int] | None,
+        served_prefix_path_map: dict[int, str] | None,
+    ) -> RecommendationSession:
+        prefix_ids = served_prefix_ids or []
+        prefix_path_map = served_prefix_path_map or {}
+        candidates = self.repository.fetch_popular_candidates(
+            limit=max(settings.popular_candidate_limit, request.limit),
+            exclude_ids=exclude_ids | set(prefix_ids),
+            blocked_domains=settings.blocked_domains,
+        )
+        candidate_ids = [candidate.news_id for candidate in candidates]
+        fallback_used = False
+        fallback_reason = None
+        path = "popular"
+        if not candidate_ids:
+            candidate_ids = self.repository.fetch_latest_news_ids(
+                limit=request.limit,
+                offset=0,
+                exclude_ids=exclude_ids | set(prefix_ids),
+            )
+            fallback_used = True
+            fallback_reason = "popular_pool_empty"
+            path = "latest"
+        timeline_ids = prefix_ids + candidate_ids
+        timeline_path_map = {
+            **prefix_path_map,
+            **{news_id: path for news_id in candidate_ids},
+        }
+        return RecommendationSession(
+            request_id=request_id,
+            user_id=request.user_id,
+            limit=request.limit,
+            timeline_ids=timeline_ids,
+            onboarding_queue=[],
+            behavior_queue=[],
+            breaking_queue=[],
+            popular_queue=candidate_ids if path == "popular" else [],
+            current_mix_policy={path: len(candidate_ids)},
+            mix_allocator="ab_baseline",
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            source=f"ab_popular_{context.user_state}",
+            experiment_id=assignment.experiment_id,
+            variant=assignment.variant,
+            timeline_path_map=timeline_path_map,
+            debug_context=self._request_context_payload(request),
+            cache_key=self._cache_key(request_id),
+        )
+
+    def _build_random_session(
+        self,
+        *,
+        request: RecommendNewsRequest,
+        request_id: str,
+        context,
+        exclude_ids: set[int],
+        assignment: ExperimentAssignment,
+        served_prefix_ids: list[int] | None,
+        served_prefix_path_map: dict[int, str] | None,
+    ) -> RecommendationSession:
+        prefix_ids = served_prefix_ids or []
+        prefix_path_map = served_prefix_path_map or {}
+        candidate_limit = max(settings.default_limit_max, request.limit * settings.retrieval_candidate_pool_multiplier)
+        candidates = self.repository.fetch_recent_candidates(
+            limit=candidate_limit,
+            hours=settings.base_pool_hours,
+            exclude_ids=exclude_ids | set(prefix_ids),
+            stale_cutoff_minutes=None,
+            blocked_domains=settings.blocked_domains,
+        )
+        candidate_ids = [candidate.news_id for candidate in candidates]
+        rng = self.experiment_service.stable_random(
+            assignment=assignment,
+            user_id=request.user_id,
+            request_id=request_id,
+        )
+        rng.shuffle(candidate_ids)
+        fallback_used = False
+        fallback_reason = None
+        path = "random"
+        if not candidate_ids:
+            candidate_ids = self.repository.fetch_latest_news_ids(
+                limit=request.limit,
+                offset=0,
+                exclude_ids=exclude_ids | set(prefix_ids),
+            )
+            fallback_used = True
+            fallback_reason = "random_pool_empty"
+            path = "latest"
+        timeline_ids = prefix_ids + candidate_ids
+        timeline_path_map = {
+            **prefix_path_map,
+            **{news_id: path for news_id in candidate_ids},
+        }
+        return RecommendationSession(
+            request_id=request_id,
+            user_id=request.user_id,
+            limit=request.limit,
+            timeline_ids=timeline_ids,
+            onboarding_queue=[],
+            behavior_queue=[],
+            breaking_queue=[],
+            popular_queue=[],
+            current_mix_policy={path: len(candidate_ids)},
+            mix_allocator="ab_baseline",
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            source=f"ab_random_{context.user_state}",
+            experiment_id=assignment.experiment_id,
+            variant=assignment.variant,
+            timeline_path_map=timeline_path_map,
+            debug_context=self._request_context_payload(request),
+            cache_key=self._cache_key(request_id),
+        )
 
     def _restore_stale_session(
         self,
@@ -234,6 +467,10 @@ class RecommendService:
                 news_id: stale_session.timeline_path_map.get(news_id, "unknown")
                 for news_id in stale_session.served_ids
             },
+            assignment=ExperimentAssignment(
+                experiment_id=stale_session.experiment_id,
+                variant=stale_session.variant,
+            ),
         )
         restored.batch_generation_id = stale_session.batch_generation_id + 1
         restored.prefetch_status = "stale_restored"
@@ -246,6 +483,8 @@ class RecommendService:
         return restored
 
     def _maybe_prefetch(self, *, session: RecommendationSession) -> None:
+        if session.variant != "recommend":
+            return
         primary_set = set(session.onboarding_queue) | set(session.behavior_queue)
         remaining_primary = max(
             len(primary_set) - len([news_id for news_id in session.served_ids if news_id in primary_set]),
@@ -345,7 +584,14 @@ class RecommendService:
             return session
 
         if settings.prefetch_policy == "primary_replenish_first":
-            rebuilt = self._build_session(request=request, request_id=session.request_id)
+            rebuilt = self._build_session(
+                request=request,
+                request_id=session.request_id,
+                assignment=ExperimentAssignment(
+                    experiment_id=session.experiment_id,
+                    variant=session.variant,
+                ),
+            )
             rebuilt.served_ids = session.served_ids[:]
             rebuilt.batch_generation_id = session.batch_generation_id + 1
             rebuilt.prefetch_status = "rebuilt"
@@ -393,6 +639,8 @@ class RecommendService:
                 mix_ratio=dict(session.current_mix_policy),
                 source=session.source,
                 user_state=user_state,
+                experiment_id=session.experiment_id,
+                variant=session.variant,
             )
         )
 
@@ -483,8 +731,20 @@ class RecommendService:
                     rank=offset + index,
                     path=path,
                     batch_generation_id=session.batch_generation_id,
+                    experiment_id=session.experiment_id,
+                    variant=session.variant,
                 )
             )
+
+    def _is_experiment_eligible(self, *, user_id: int) -> bool:
+        min_requests = max(settings.recommend_experiment_min_requests, 0)
+        if min_requests <= 0:
+            return True
+        try:
+            return self.repository.fetch_recommend_request_count(user_id=user_id) >= min_requests
+        except Exception as exc:
+            logger.warning("recommend experiment eligibility lookup failed for user_id=%s: %s", user_id, exc)
+            return False
 
     @staticmethod
     def _cache_key(request_id: str) -> str:
@@ -498,6 +758,7 @@ class RecommendService:
             "breaking": "B",
             "popular": "C",
             "latest": "LATEST",
+            "random": "RANDOM",
         }
         return path_map.get(path, path.upper())
 
@@ -520,6 +781,14 @@ class RecommendService:
         if source.endswith("_cold"):
             return "cold"
         return "fallback"
+
+    @staticmethod
+    def _session_event(*, cache_status: str, prefetch_status: str) -> str | None:
+        if cache_status == "stale_restored":
+            return "stale_restored"
+        if prefetch_status in {"rebuilt", "rolled_over"}:
+            return prefetch_status
+        return None
 
     @staticmethod
     def _aware_datetime(value: object) -> datetime | None:

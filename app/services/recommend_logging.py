@@ -40,6 +40,8 @@ class RequestLog:
     mix_ratio: dict[str, int]
     source: str
     user_state: str
+    experiment_id: str
+    variant: str
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ class ImpressionLog:
     rank: int
     path: str
     batch_generation_id: int
+    experiment_id: str
+    variant: str
 
 
 def log_request(payload: RequestLog) -> None:

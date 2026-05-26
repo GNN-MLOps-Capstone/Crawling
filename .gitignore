@@ -19,9 +19,16 @@
 # 런/디버그 설정
 !.idea/runConfigurations/
 
-#prometheus file
-!prometheus-grafana/prometheus/config
-prometheus-grafana
+# Prometheus/Grafana runtime data is ignored; provisioning/config files are tracked.
+prometheus-grafana/*
+!prometheus-grafana/prometheus/
+prometheus-grafana/prometheus/*
+!prometheus-grafana/prometheus/config/
+!prometheus-grafana/prometheus/config/**
+!prometheus-grafana/grafana-provisioning/
+!prometheus-grafana/grafana-provisioning/**
+!prometheus-grafana/grafana-dashboards/
+!prometheus-grafana/grafana-dashboards/**
 logs/
 
 #notebooks

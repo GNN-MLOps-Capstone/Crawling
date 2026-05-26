@@ -40,6 +40,7 @@ REQUIRED_COLUMNS = {
         "dwell_event_count",
         "sum_log_dwell_time",
     },
+    "recommendation_serves": {"request_id", "user_id", "source", "served_items", "experiment_id", "variant"},
     "recommendation_path_c_snapshot": {"snapshot_at", "news_ids"},
     "recommendation_path_a2_snapshot": {"user_id", "items", "snapshot_at"},
     "recommendation_bandit_state": {

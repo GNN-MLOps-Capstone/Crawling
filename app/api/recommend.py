@@ -9,14 +9,21 @@ from app.schemas.recommend import (
     RecommendNewsResponse,
 )
 from app.services.context_builder import RecommendContextBuilder
+from app.services.experiment_service import ExperimentService, build_experiment_counter_store
 from app.services.cursor_service import CursorError
 from app.services.bandit_service import BanditArm, BanditService, build_bandit_db_state_store
+from app.services.metrics import record_cursor_error, record_recommend_error
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_cache import build_session_cache
 
 router = APIRouter()
 _session_cache = build_session_cache(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    password=settings.redis_password,
+)
+_experiment_counter_store = build_experiment_counter_store(
     host=settings.redis_host,
     port=settings.redis_port,
     password=settings.redis_password,
@@ -61,6 +68,7 @@ def get_recommend_service() -> RecommendService:
             user_posterior_weight=settings.bandit_user_posterior_weight,
             state_store=_bandit_state_store,
         ),
+        experiment_service=ExperimentService(counter_store=_experiment_counter_store),
     )
 
 
@@ -76,6 +84,8 @@ def recommend_news(
     try:
         return service.recommend_news(request)
     except CursorError as exc:
+        record_cursor_error(reason=str(exc))
+        record_recommend_error(error_code="INVALID_CURSOR")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={

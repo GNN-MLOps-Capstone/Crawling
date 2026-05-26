@@ -11,6 +11,7 @@ from app.repositories.news_repository import NewsCandidate, NewsRepository, Serv
 from app.schemas.recommend import RecommendNewsRequest
 import app.services.recommend_service as recommend_service_module
 from app.services.context_builder import RecommendContextBuilder
+from app.services.experiment_service import ExperimentAssignment, ExperimentService, InMemoryExperimentCounterStore
 from app.services.bandit_service import BanditArm, BanditPosterior, BanditService, NullBanditStateStore
 from app.services.recommend_service import RecommendService
 from app.services.retrieval_service import RetrievalService
@@ -26,16 +27,21 @@ class FakeNewsRepository:
         actions_by_user_id: dict[int, list[dict[str, object]]] | None = None,
         read_news_ids_by_user_id: dict[int, set[int]] | None = None,
         served_news_by_user_id: dict[int, dict[int, ServedNewsStats]] | None = None,
+        request_counts_by_user_id: dict[int, int] | None = None,
     ) -> None:
         self.news_ids = news_ids
         self.profiles_by_user_id = profiles_by_user_id or {}
         self.actions_by_user_id = actions_by_user_id or {}
         self.read_news_ids_by_user_id = read_news_ids_by_user_id or {}
         self.served_news_by_user_id = served_news_by_user_id or {}
+        self.request_counts_by_user_id = request_counts_by_user_id or {}
         self.news_entities_by_id: dict[int, dict[str, list[str]]] = {}
         self.entity_embeddings: dict[tuple[str, str], list[float]] = {}
         self.fetch_recent_candidates_calls: list[dict[str, object]] = []
         self.popular_candidates: list[NewsCandidate] = []
+
+    def fetch_recommend_request_count(self, *, user_id: int) -> int:
+        return self.request_counts_by_user_id.get(user_id, 0)
 
     def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:
         return self.profiles_by_user_id.get(user_id, {})
@@ -168,6 +174,23 @@ class PathBOnlyRepository(FakeNewsRepository):
             stale_cutoff_minutes=None,
             blocked_domains=blocked_domains,
         )
+
+
+class FixedExperimentService:
+    def __init__(self, *, experiment_id: str, variant: str) -> None:
+        self.assignment = ExperimentAssignment(experiment_id=experiment_id, variant=variant)
+
+    def assign(self, *, user_id: int, eligible: bool = True) -> ExperimentAssignment:
+        del user_id
+        if not eligible:
+            return ExperimentAssignment(experiment_id=self.assignment.experiment_id, variant="recommend")
+        return self.assignment
+
+    def stable_random(self, *, assignment: ExperimentAssignment, user_id: int, request_id: str):
+        del assignment, user_id, request_id
+        import random
+
+        return random.Random(7)
 
 
 class FakeRedisClient:
@@ -1183,3 +1206,167 @@ def test_recommendation_response_emits_impression_logs(monkeypatch) -> None:
     assert captured[0].news_id == 21
     assert captured[0].rank == 1
     assert captured[0].path == "breaking"
+    assert captured[0].experiment_id == "control"
+    assert captured[0].variant == "recommend"
+
+
+def test_prometheus_metrics_endpoint_emits_recommendation_metrics() -> None:
+    client = _client_with_ids([10, 9, 8])
+
+    response = client.post("/recommend/news", json={"user_id": 1, "limit": 2})
+    assert response.status_code == 200
+
+    metrics = client.get("/metrics/")
+    assert metrics.status_code == 200
+    body = metrics.text
+    assert "recommend_requests_total" in body
+    assert "recommend_path_items_total" in body
+    assert "experiment_id=\"control\"" in body
+    assert "variant=\"recommend\"" in body
+
+
+def _service_with_fixed_experiment(repository: FakeNewsRepository, *, variant: str) -> RecommendService:
+    return RecommendService(
+        repository=repository,
+        session_cache=InMemorySessionCache(),
+        context_builder=RecommendContextBuilder(),
+        retrieval_service=RetrievalService(
+            repository=repository,
+            base_pool_hours=72,
+            onboarding_hours=72,
+            behavior_hours=72,
+            breaking_hours=2,
+            breaking_stale_cutoff_minutes=120,
+            onboarding_limit=50,
+            behavior_limit=50,
+            breaking_limit=30,
+            popular_limit=30,
+        ),
+        bandit_service=BanditService(
+            arms=(
+                BanditArm(path="onboarding", weight=2),
+                BanditArm(path="behavior", weight=2),
+                BanditArm(path="breaking", weight=1),
+                BanditArm(path="popular", weight=1),
+            ),
+            first_page_window=recommend_service_module.settings.guardrail_first_page_window,
+            min_breaking_in_window=recommend_service_module.settings.guardrail_min_breaking_in_window,
+        ),
+        experiment_service=FixedExperimentService(experiment_id="ranking-baseline", variant=variant),
+    )
+
+
+def test_ab_latest_variant_serves_latest_baseline_with_assignment_meta() -> None:
+    service = _service_with_fixed_experiment(FakeNewsRepository([10, 9, 8], request_counts_by_user_id={1: 5}), variant="latest")
+
+    response = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, request_id="ab-latest", context={}))
+
+    assert [item.news_id for item in response.items] == [10, 9]
+    assert [item.path for item in response.items] == ["LATEST", "LATEST"]
+    assert response.meta.experiment_id == "ranking-baseline"
+    assert response.meta.variant == "latest"
+
+
+def test_ab_random_variant_serves_deterministic_random_baseline() -> None:
+    service = _service_with_fixed_experiment(FakeNewsRepository([10, 9, 8, 7], request_counts_by_user_id={1: 5}), variant="random")
+
+    first = service.recommend_news(RecommendNewsRequest(user_id=1, limit=4, request_id="ab-random", context={}))
+    second = service.recommend_news(
+        RecommendNewsRequest(user_id=1, limit=4, request_id="ab-random", force_refresh=True, context={})
+    )
+
+    assert [item.news_id for item in first.items] == [item.news_id for item in second.items]
+    assert {item.path for item in first.items} == {"RANDOM"}
+    assert first.meta.experiment_id == "ranking-baseline"
+    assert first.meta.variant == "random"
+
+
+def test_ab_variant_requires_minimum_prior_recommend_requests() -> None:
+    service = _service_with_fixed_experiment(FakeNewsRepository([10, 9, 8], request_counts_by_user_id={1: 4}), variant="latest")
+
+    response = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, request_id="ab-ineligible", context={}))
+
+    assert response.meta.variant == "recommend"
+    assert all(item.path != "LATEST" for item in response.items)
+
+
+def test_ab_popular_variant_serves_popular_baseline() -> None:
+    repository = FakeNewsRepository([10, 9, 8], request_counts_by_user_id={1: 5})
+    repository.popular_candidates = [
+        NewsCandidate(
+            news_id=30,
+            title="popular-30",
+            pub_date=datetime.now(UTC),
+            url="https://example.com/30",
+            category="unknown",
+            domain="example.com",
+        ),
+        NewsCandidate(
+            news_id=29,
+            title="popular-29",
+            pub_date=datetime.now(UTC),
+            url="https://example.com/29",
+            category="unknown",
+            domain="example.com",
+        ),
+    ]
+    service = _service_with_fixed_experiment(repository, variant="popular")
+
+    response = service.recommend_news(RecommendNewsRequest(user_id=1, limit=2, request_id="ab-popular", context={}))
+
+    assert [item.news_id for item in response.items] == [30, 29]
+    assert [item.path for item in response.items] == ["C", "C"]
+    assert response.meta.variant == "popular"
+
+
+def test_experiment_service_assigns_per_user_weighted_cycle(monkeypatch) -> None:
+    import app.services.experiment_service as experiment_service_module
+
+    monkeypatch.setattr(
+        experiment_service_module,
+        "settings",
+        replace(
+            experiment_service_module.settings,
+            recommend_experiment_id="cycle-test",
+            recommend_variant="default",
+            recommend_experiment_variants="recommend:8,latest:1,popular:1",
+        ),
+    )
+    service = ExperimentService(counter_store=InMemoryExperimentCounterStore())
+
+    variants = [service.assign(user_id=42, eligible=True).variant for _ in range(10)]
+
+    assert variants == [
+        "recommend",
+        "recommend",
+        "recommend",
+        "recommend",
+        "recommend",
+        "recommend",
+        "recommend",
+        "recommend",
+        "latest",
+        "popular",
+    ]
+    assert service.assign(user_id=42, eligible=True).variant == "recommend"
+
+
+def test_experiment_service_keeps_cycle_per_user(monkeypatch) -> None:
+    import app.services.experiment_service as experiment_service_module
+
+    monkeypatch.setattr(
+        experiment_service_module,
+        "settings",
+        replace(
+            experiment_service_module.settings,
+            recommend_experiment_id="cycle-test",
+            recommend_variant="default",
+            recommend_experiment_variants="recommend:1,latest:1",
+        ),
+    )
+    service = ExperimentService(counter_store=InMemoryExperimentCounterStore())
+
+    assert service.assign(user_id=1, eligible=True).variant == "recommend"
+    assert service.assign(user_id=2, eligible=True).variant == "recommend"
+    assert service.assign(user_id=1, eligible=True).variant == "latest"
+    assert service.assign(user_id=2, eligible=True).variant == "latest"

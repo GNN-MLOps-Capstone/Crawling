@@ -7,6 +7,11 @@ class Settings:
     app_name: str = os.getenv("RECO_APP_NAME", "recommend-api")
     app_version: str = os.getenv("RECO_APP_VERSION", "0.1.0")
     model_version: str = os.getenv("RECO_MODEL_VERSION", "v1")
+    recommend_experiment_id: str = os.getenv("RECO_EXPERIMENT_ID", "control")
+    recommend_variant: str = os.getenv("RECO_VARIANT", "default")
+    recommend_experiment_variants: str = os.getenv("RECO_EXPERIMENT_VARIANTS", "recommend:8,latest:1,popular:1")
+    recommend_experiment_min_requests: int = int(os.getenv("RECO_EXPERIMENT_MIN_REQUESTS", "5"))
+    recommend_experiment_counter_key_prefix: str = os.getenv("RECO_EXPERIMENT_COUNTER_KEY_PREFIX", "recommend:experiment")
 
     db_host: str = os.getenv("NEWS_DB_HOST", "localhost")
     db_port: int = int(os.getenv("NEWS_DB_PORT", "5432"))

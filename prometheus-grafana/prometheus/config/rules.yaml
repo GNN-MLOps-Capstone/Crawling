@@ -1,19 +1,66 @@
 groups:
-  - name: example
+  - name: recommend-api
     rules:
-      - alert: InstanceDown
-        expr: up == 0
-        for: 5m
+      - alert: RecommendApiDown
+        expr: up{job="recommend-api"} == 0
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "Instance {{ $labels.instance }} down"
-          description: "{{ $labels.instance }} has been down for more than 5 minutes."
-      - alert: APIHighRequestLatency
-        expr: api_http_request_latencies_second{quantile="0.5"} > 1
+          summary: "Recommend API target is down"
+          description: "Prometheus has not been able to scrape recommend-api for more than 2 minutes."
+
+      - alert: RecommendApiHighErrorRate
+        expr: |
+          (
+            sum(rate(recommend_api_http_requests_total{path="/recommend/news",status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(recommend_api_http_requests_total{path="/recommend/news"}[5m])), 1)
+          ) > 0.05
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "High request latency on {{ $labels.instance }}"
-          description: "{{ $labels.instance }} has a median request latency above 1s (current value: {{ $value }}s)"
+          summary: "Recommend API 5xx rate is high"
+          description: "More than 5% of /recommend/news requests are returning 5xx for 10 minutes."
+
+      - alert: RecommendApiHighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(recommend_request_latency_seconds_bucket[5m])) by (le, experiment_id, variant)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recommend API p95 latency is high"
+          description: "p95 recommendation latency is above 2 seconds for experiment={{ $labels.experiment_id }} variant={{ $labels.variant }}."
+
+      - alert: RecommendFallbackRateHigh
+        expr: |
+          (
+            sum(rate(recommend_fallback_total[15m])) by (experiment_id, variant)
+            /
+            clamp_min(sum(rate(recommend_requests_total{status="success"}[15m])) by (experiment_id, variant), 1)
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recommend fallback rate is high"
+          description: "Fallback rate is above 50% for experiment={{ $labels.experiment_id }} variant={{ $labels.variant }}."
+
+      - alert: RecommendEmptyResultRateHigh
+        expr: |
+          (
+            sum(rate(recommend_empty_results_total[15m])) by (experiment_id, variant)
+            /
+            clamp_min(sum(rate(recommend_requests_total{status="success"}[15m])) by (experiment_id, variant), 1)
+          ) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recommend empty result rate is high"
+          description: "Empty recommendation responses are above 10% for experiment={{ $labels.experiment_id }} variant={{ $labels.variant }}."

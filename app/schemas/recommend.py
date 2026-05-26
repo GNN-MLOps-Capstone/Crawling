@@ -35,6 +35,8 @@ class RecommendNewsMeta(BaseModel):
     source: str
     fallback_used: bool
     fallback_reason: str | None = None
+    experiment_id: str | None = None
+    variant: str | None = None
 
 
 class RecommendNewsResponse(BaseModel):

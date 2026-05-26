@@ -381,8 +381,16 @@ services:
   grafana:
     image: grafana/grafana
     user: "0:0" # 권한 문제 방지
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      DATA_POSTGRES_USER: ${DATA_POSTGRES_USER}
+      DATA_POSTGRES_PASSWORD: ${DATA_POSTGRES_PASSWORD}
+      DATA_POSTGRES_DB_NAME: ${DATA_POSTGRES_DB_NAME}
     volumes:
       - ./prometheus-grafana/grafana/volume:/var/lib/grafana
+      - ./prometheus-grafana/grafana-provisioning:/etc/grafana/provisioning:ro
+      - ./prometheus-grafana/grafana-dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3000:3000" # 웹 UI 접속용 포트 오픈 권장
     restart: always
@@ -528,6 +536,11 @@ services:
       - "18000:8000"
     environment:
       RECO_MODEL_VERSION: v1
+      RECO_EXPERIMENT_ID: ${RECO_EXPERIMENT_ID:-control}
+      RECO_VARIANT: ${RECO_VARIANT:-default}
+      RECO_EXPERIMENT_VARIANTS: ${RECO_EXPERIMENT_VARIANTS:-recommend:8,latest:1,popular:1}
+      RECO_EXPERIMENT_MIN_REQUESTS: ${RECO_EXPERIMENT_MIN_REQUESTS:-5}
+      RECO_EXPERIMENT_COUNTER_KEY_PREFIX: ${RECO_EXPERIMENT_COUNTER_KEY_PREFIX:-recommend:experiment}
       RECO_BANDIT_ALLOCATOR: ${RECO_BANDIT_ALLOCATOR:-thompson}
       RECO_BANDIT_BATCH_SIZE: ${RECO_BANDIT_BATCH_SIZE:-20}
       RECO_BANDIT_MIN_ITEMS_PER_PATH: ${RECO_BANDIT_MIN_ITEMS_PER_PATH:-2}

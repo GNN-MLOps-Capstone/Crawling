@@ -1,0 +1,1293 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "API Observability",
+      "type": "link",
+      "url": "/d/recommend-api-observability/recommend-api-observability"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Experiment Exposure",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Success QPS",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m]))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Error Rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_requests_total{status!=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) / clamp_min(sum(rate(recommend_requests_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])), 1)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Empty Result Rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_empty_results_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) / clamp_min(sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])), 1)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Fallback Rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_fallback_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) / clamp_min(sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])), 1)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Variant Traffic Share",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant) / clamp_min(sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])), 1)",
+          "legendFormat": "{{variant}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "p95 Latency by Variant",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum(rate(recommend_request_latency_seconds_bucket{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (le, variant))",
+          "legendFormat": "{{variant}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Online Effect Metrics",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "CTR by Variant",
+      "description": "Uses recommendation_serves experiment_id/variant with source fallback for historical rows.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), clicks AS (\n  SELECT DISTINCT ie.request_id, ie.user_id, ie.news_id\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL\n)\nSELECT time, metric, COUNT(c.news_id)::double precision / NULLIF(COUNT(*), 0) AS value\nFROM impressions i\nLEFT JOIN clicks c ON c.request_id = i.request_id AND c.user_id = i.user_id AND c.news_id = i.news_id\nGROUP BY time, metric\nORDER BY time;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Hit@5 by Variant",
+      "description": "",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id, COALESCE(NULLIF(item ->> 'position', '')::integer, 2147483647) AS rank\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), sessions AS (\n  SELECT DISTINCT time, metric, request_id, user_id FROM impressions\n), clicks AS (\n  SELECT DISTINCT ie.request_id, ie.user_id, ie.news_id\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL\n), clicked_sessions AS (\n  SELECT DISTINCT i.time, i.metric, i.request_id, i.user_id\n  FROM impressions i\n  JOIN clicks c ON c.request_id = i.request_id AND c.user_id = i.user_id AND c.news_id = i.news_id\n  WHERE i.rank <= 5\n)\nSELECT s.time, s.metric, COUNT(cs.request_id)::double precision / NULLIF(COUNT(*), 0) AS value\nFROM sessions s\nLEFT JOIN clicked_sessions cs ON cs.time = s.time AND cs.metric = s.metric AND cs.request_id = s.request_id AND cs.user_id = s.user_id\nGROUP BY s.time, s.metric\nORDER BY s.time;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "MRR by Variant",
+      "description": "",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id, COALESCE(NULLIF(item ->> 'position', '')::integer, 2147483647) AS rank\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), sessions AS (\n  SELECT DISTINCT time, metric, request_id, user_id FROM impressions\n), clicks AS (\n  SELECT DISTINCT ie.request_id, ie.user_id, ie.news_id\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL\n), first_click AS (\n  SELECT i.time, i.metric, i.request_id, i.user_id, MIN(i.rank) AS first_clicked_rank\n  FROM impressions i\n  JOIN clicks c ON c.request_id = i.request_id AND c.user_id = i.user_id AND c.news_id = i.news_id\n  GROUP BY i.time, i.metric, i.request_id, i.user_id\n)\nSELECT s.time, s.metric, AVG(CASE WHEN fc.first_clicked_rank IS NULL THEN 0.0 ELSE 1.0 / fc.first_clicked_rank END) AS value\nFROM sessions s\nLEFT JOIN first_click fc ON fc.time = s.time AND fc.metric = s.metric AND fc.request_id = s.request_id AND fc.user_id = s.user_id\nGROUP BY s.time, s.metric\nORDER BY s.time;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "30s Dwell Rate by Variant",
+      "description": "",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), opens AS (\n  SELECT ie.request_id, ie.user_id, ie.news_id, ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS open_ts\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.request_id, ie.user_id, ie.news_id, ie.content_session_id\n), leaves AS (\n  SELECT ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS leave_ts\n  FROM public.interaction_events ie\n  WHERE ie.event_ts_server >= $__timeFrom() AND ie.event_ts_server < $__timeTo() + INTERVAL '1 hour' AND ie.event_type = 'content_leave' AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.content_session_id\n), dwell AS (\n  SELECT o.request_id, o.user_id, o.news_id, GREATEST(EXTRACT(EPOCH FROM (l.leave_ts - o.open_ts)), 0) AS dwell_seconds\n  FROM opens o JOIN leaves l ON l.content_session_id = o.content_session_id\n  WHERE l.leave_ts >= o.open_ts\n)\nSELECT i.time, i.metric, COUNT(CASE WHEN d.dwell_seconds >= 30 THEN 1 END)::double precision / NULLIF(COUNT(*), 0) AS value\nFROM impressions i\nLEFT JOIN dwell d ON d.request_id = i.request_id AND d.user_id = i.user_id AND d.news_id = i.news_id\nGROUP BY i.time, i.metric\nORDER BY i.time;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Decision Table",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Variant Summary",
+      "description": "",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH impressions AS (\n  SELECT COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS variant, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id, COALESCE(NULLIF(item ->> 'position', '')::integer, 2147483647) AS rank\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), clicks AS (\n  SELECT DISTINCT ie.request_id, ie.user_id, ie.news_id\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL\n), first_click AS (\n  SELECT i.variant, i.request_id, i.user_id, MIN(i.rank) AS first_clicked_rank\n  FROM impressions i\n  JOIN clicks c ON c.request_id = i.request_id AND c.user_id = i.user_id AND c.news_id = i.news_id\n  GROUP BY i.variant, i.request_id, i.user_id\n), sessions AS (\n  SELECT DISTINCT variant, request_id, user_id FROM impressions\n)\nSELECT i.variant, COUNT(*) AS impressions, COUNT(c.news_id) AS clicks,\n       ROUND(COUNT(c.news_id)::numeric / NULLIF(COUNT(*), 0), 4) AS ctr,\n       ROUND(AVG(CASE WHEN fc.first_clicked_rank IS NULL THEN 0.0 ELSE 1.0 / fc.first_clicked_rank END)::numeric, 4) AS mrr,\n       ROUND(COUNT(DISTINCT CASE WHEN i.rank <= 5 AND c.news_id IS NOT NULL THEN i.request_id || ':' || i.user_id END)::numeric / NULLIF(COUNT(DISTINCT s.request_id || ':' || s.user_id), 0), 4) AS hit_at_5,\n       COUNT(DISTINCT s.request_id || ':' || s.user_id) AS sessions\nFROM impressions i\nLEFT JOIN clicks c ON c.request_id = i.request_id AND c.user_id = i.user_id AND c.news_id = i.news_id\nLEFT JOIN first_click fc ON fc.variant = i.variant AND fc.request_id = i.request_id AND fc.user_id = i.user_id\nLEFT JOIN sessions s ON s.variant = i.variant AND s.request_id = i.request_id AND s.user_id = i.user_id\nGROUP BY i.variant\nORDER BY i.variant;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "table",
+      "title": "DB Experiment Assignment Mapping",
+      "description": "",
+      "datasource": {
+        "type": "postgres",
+        "uid": "news-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "news-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(NULLIF(rs.experiment_id, ''), 'control') AS experiment_id, COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS variant, rs.source, COUNT(DISTINCT rs.request_id) AS sessions, SUM(rs.served_count) AS served_items\nFROM public.recommendation_serves rs\nWHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\nGROUP BY experiment_id, variant, rs.source\nORDER BY experiment_id, variant, sessions DESC;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Guardrails",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Fallback Rate by Variant",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_fallback_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant) / clamp_min(sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant), 1)",
+          "legendFormat": "{{variant}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Empty Result Rate by Variant",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_empty_results_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant) / clamp_min(sum(rate(recommend_requests_total{status=\"success\",experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant), 1)",
+          "legendFormat": "{{variant}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Returned Items by Path and Variant",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_path_items_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant, path)",
+          "legendFormat": "{{variant}}/{{path}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "items/s",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Cursor Errors by Variant",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(recommend_cursor_errors_total{experiment_id=~\"$experiment_id\",variant=~\"$prom_variant\"}[5m])) by (variant, reason)",
+          "legendFormat": "{{variant}}/{{reason}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "errors/s",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "recommend",
+    "ab-test",
+    "evaluation"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(recommend_requests_total, experiment_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Experiment",
+        "multi": true,
+        "name": "experiment_id",
+        "options": [],
+        "query": {
+          "query": "label_values(recommend_requests_total, experiment_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(recommend_requests_total{experiment_id=~\"$experiment_id\"}, variant)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Prom Variant",
+        "multi": true,
+        "name": "prom_variant",
+        "options": [],
+        "query": {
+          "query": "label_values(recommend_requests_total{experiment_id=~\"$experiment_id\"}, variant)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "news-postgres"
+        },
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(experiment_id, ''), 'control') AS __text, COALESCE(NULLIF(experiment_id, ''), 'control') AS __value FROM public.recommendation_serves ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "DB Experiment",
+        "multi": true,
+        "name": "db_experiment",
+        "options": [],
+        "query": "SELECT DISTINCT COALESCE(NULLIF(experiment_id, ''), 'control') AS __text, COALESCE(NULLIF(experiment_id, ''), 'control') AS __value FROM public.recommendation_serves ORDER BY 1",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "recommend",
+            "latest",
+            "popular"
+          ],
+          "value": [
+            "recommend",
+            "latest",
+            "popular"
+          ]
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "DB Variant",
+        "multi": true,
+        "name": "variant",
+        "options": [
+          {
+            "selected": true,
+            "text": "recommend",
+            "value": "recommend"
+          },
+          {
+            "selected": true,
+            "text": "latest",
+            "value": "latest"
+          },
+          {
+            "selected": true,
+            "text": "popular",
+            "value": "popular"
+          },
+          {
+            "selected": false,
+            "text": "random",
+            "value": "random"
+          }
+        ],
+        "query": "recommend,latest,popular,random",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Recommend A/B Test Evaluation",
+  "uid": "recommend-ab-test-evaluation",
+  "version": 3,
+  "weekStart": ""
+}
