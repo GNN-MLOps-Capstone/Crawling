@@ -379,7 +379,7 @@ services:
       - proxy-net
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:11.6.1
     user: "0:0" # 권한 문제 방지
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}

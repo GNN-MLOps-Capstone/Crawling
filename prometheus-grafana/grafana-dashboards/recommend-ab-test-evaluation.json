@@ -417,7 +417,7 @@
       "title": "CTR by Variant",
       "description": "Uses recommendation_serves experiment_id/variant with source fallback for historical rows.",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -429,7 +429,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "time_series",
@@ -492,7 +492,7 @@
       "title": "Hit@5 by Variant",
       "description": "",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -504,7 +504,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "time_series",
@@ -567,7 +567,7 @@
       "title": "MRR by Variant",
       "description": "",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -579,7 +579,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "time_series",
@@ -642,7 +642,7 @@
       "title": "30s Dwell Rate by Variant",
       "description": "",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -654,12 +654,12 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), opens AS (\n  SELECT ie.request_id, ie.user_id, ie.news_id, ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS open_ts\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.request_id, ie.user_id, ie.news_id, ie.content_session_id\n), leaves AS (\n  SELECT ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS leave_ts\n  FROM public.interaction_events ie\n  WHERE ie.event_ts_server >= $__timeFrom() AND ie.event_ts_server < $__timeTo() + INTERVAL '1 hour' AND ie.event_type = 'content_leave' AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.content_session_id\n), dwell AS (\n  SELECT o.request_id, o.user_id, o.news_id, GREATEST(EXTRACT(EPOCH FROM (l.leave_ts - o.open_ts)), 0) AS dwell_seconds\n  FROM opens o JOIN leaves l ON l.content_session_id = o.content_session_id\n  WHERE l.leave_ts >= o.open_ts\n)\nSELECT i.time, i.metric, COUNT(CASE WHEN d.dwell_seconds >= 30 THEN 1 END)::double precision / NULLIF(COUNT(*), 0) AS value\nFROM impressions i\nLEFT JOIN dwell d ON d.request_id = i.request_id AND d.user_id = i.user_id AND d.news_id = i.news_id\nGROUP BY i.time, i.metric\nORDER BY i.time;",
+          "rawSql": "WITH impressions AS (\n  SELECT $__timeGroupAlias(rs.created_at, $__interval), COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END) AS metric, rs.request_id, rs.user_id, (item ->> 'news_id')::bigint AS news_id\n  FROM public.recommendation_serves rs\n  CROSS JOIN LATERAL jsonb_array_elements(rs.served_items) AS item\n  WHERE $__timeFilter(rs.created_at) AND (COALESCE(NULLIF(rs.variant, ''), CASE WHEN rs.source LIKE 'ab_latest_%' THEN 'latest' WHEN rs.source LIKE 'ab_popular_%' THEN 'popular' WHEN rs.source LIKE 'ab_random_%' THEN 'random' ELSE 'recommend' END)) IN (${variant:sqlstring})\n    AND COALESCE(NULLIF(rs.experiment_id, ''), 'control') IN (${db_experiment:sqlstring})\n    AND rs.request_id IS NOT NULL AND item ? 'news_id' AND (item ->> 'news_id') ~ '^[0-9]+$'\n), opens AS (\n  SELECT ie.request_id, ie.user_id, ie.news_id, ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS open_ts\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_open' AND ie.request_id IS NOT NULL AND ie.news_id IS NOT NULL AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.request_id, ie.user_id, ie.news_id, ie.content_session_id\n), leaves AS (\n  SELECT ie.content_session_id, MIN(COALESCE(ie.event_ts_client, ie.event_ts_server)) AS leave_ts\n  FROM public.interaction_events ie\n  WHERE $__timeFilter(ie.event_ts_server) AND ie.event_type = 'content_leave' AND ie.content_session_id IS NOT NULL\n  GROUP BY ie.content_session_id\n), dwell AS (\n  SELECT o.request_id, o.user_id, o.news_id, GREATEST(EXTRACT(EPOCH FROM (l.leave_ts - o.open_ts)), 0) AS dwell_seconds\n  FROM opens o JOIN leaves l ON l.content_session_id = o.content_session_id\n  WHERE l.leave_ts >= o.open_ts\n)\nSELECT i.time, i.metric, COUNT(CASE WHEN d.dwell_seconds >= 30 THEN 1 END)::double precision / NULLIF(COUNT(*), 0) AS value\nFROM impressions i\nLEFT JOIN dwell d ON d.request_id = i.request_id AND d.user_id = i.user_id AND d.news_id = i.news_id\nGROUP BY i.time, i.metric\nORDER BY i.time;",
           "refId": "A"
         }
       ],
@@ -730,7 +730,7 @@
       "title": "Variant Summary",
       "description": "",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -742,7 +742,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "table",
@@ -782,7 +782,7 @@
       "title": "DB Experiment Assignment Mapping",
       "description": "",
       "datasource": {
-        "type": "postgres",
+        "type": "grafana-postgresql-datasource",
         "uid": "news-postgres"
       },
       "gridPos": {
@@ -794,7 +794,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "postgres",
+            "type": "grafana-postgresql-datasource",
             "uid": "news-postgres"
           },
           "format": "table",
@@ -1216,7 +1216,7 @@
           "value": "$__all"
         },
         "datasource": {
-          "type": "postgres",
+          "type": "grafana-postgresql-datasource",
           "uid": "news-postgres"
         },
         "definition": "SELECT DISTINCT COALESCE(NULLIF(experiment_id, ''), 'control') AS __text, COALESCE(NULLIF(experiment_id, ''), 'control') AS __value FROM public.recommendation_serves ORDER BY 1",
