@@ -29,6 +29,20 @@ class ServedNewsStats:
 
 
 class NewsRepository:
+    def fetch_recommend_request_count(self, *, user_id: int) -> int:
+        query = """
+            SELECT COUNT(*)::bigint
+            FROM public.recommendation_serves
+            WHERE user_id IS NOT NULL
+              AND user_id::integer = %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                row = cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
     def fetch_read_news_ids(
         self,
         *,
@@ -121,20 +135,48 @@ class NewsRepository:
         exclude_ids: set[int],
         blocked_domains: tuple[str, ...] = (),
     ) -> list[NewsCandidate]:
+        # 1. 최근 N개 snapshot에서 후보 수집 (중복 제거)
+        candidates = self._fetch_popular_from_snapshots(
+            limit=limit * 4,
+            exclude_ids=exclude_ids,
+            blocked_domains=blocked_domains,
+        )
+
+        # 2. snapshot 후보가 limit의 절반도 안 되면 DB에서 fallback
+        if len(candidates) < limit // 2:
+            additional = self._fetch_popular_from_db(
+                limit=limit * 4 - len(candidates),
+                exclude_ids=exclude_ids | {c.news_id for c in candidates},
+                blocked_domains=blocked_domains,
+            )
+            candidates.extend(additional)
+
+        if not candidates:
+            return []
+        return candidates[:limit]
+
+    def _fetch_popular_from_snapshots(
+        self,
+        *,
+        limit: int,
+        exclude_ids: set[int],
+        blocked_domains: tuple[str, ...] = (),
+    ) -> list[NewsCandidate]:
         query = """
-            WITH latest_snapshot AS (
+            WITH recent_snapshots AS (
                 SELECT snapshot_at, news_ids
                 FROM public.recommendation_path_c_snapshot
                 ORDER BY snapshot_at DESC
-                LIMIT 1
+                LIMIT 5
             ),
             ranked_ids AS (
-                SELECT
-                    ls.snapshot_at,
+                SELECT DISTINCT ON (item.news_id)
+                    rs.snapshot_at,
                     item.news_id,
                     item.rank
-                FROM latest_snapshot ls
-                CROSS JOIN LATERAL unnest(ls.news_ids) WITH ORDINALITY AS item(news_id, rank)
+                FROM recent_snapshots rs
+                CROSS JOIN LATERAL unnest(rs.news_ids) WITH ORDINALITY AS item(news_id, rank)
+                ORDER BY item.news_id, rs.snapshot_at DESC
             )
             SELECT
                 ri.snapshot_at,
@@ -181,10 +223,71 @@ class NewsRepository:
             if len(candidates) >= limit:
                 break
 
-        if not candidates or latest_snapshot_at is None:
+        if latest_snapshot_at is not None and self._is_stale_popular_snapshot(latest_snapshot_at):
             return []
-        if self._is_stale_popular_snapshot(latest_snapshot_at):
-            return []
+        return candidates
+
+    def _fetch_popular_from_db(
+        self,
+        *,
+        limit: int,
+        exclude_ids: set[int],
+        blocked_domains: tuple[str, ...] = (),
+    ) -> list[NewsCandidate]:
+        """snapshot이 부족할 때 DB에서 직접 인기 뉴스를 조회"""
+        exclude_list = list(exclude_ids) if exclude_ids else [-1]
+        query = """
+            SELECT
+                nn.news_id,
+                nn.title,
+                nn.pub_date,
+                nn.url
+            FROM naver_news nn
+            JOIN filtered_news fn ON fn.news_id = nn.news_id
+            LEFT JOIN (
+                SELECT 
+                    news_id,
+                    SUM(click_count)::float / NULLIF(SUM(impression_count), 0) as ctr
+                FROM public.recommendation_news_path_metrics
+                WHERE bucket_start >= now() - interval '7 days'
+                  AND path != 'TOTAL'
+                GROUP BY news_id
+            ) metrics ON metrics.news_id = nn.news_id
+            WHERE nn.pub_date >= now() - interval '72 hours'
+              AND nn.news_id NOT IN (SELECT unnest(%s::bigint[]))
+            ORDER BY COALESCE(metrics.ctr, 0) DESC, nn.pub_date DESC
+            LIMIT %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (exclude_list, limit))
+                rows = cur.fetchall()
+
+        candidates: list[NewsCandidate] = []
+        for news_id, title, pub_date, url in rows:
+            normalized_news_id = int(news_id)
+            if normalized_news_id in exclude_ids:
+                continue
+            normalized_url = str(url or "")
+            normalized_domain = urlparse(normalized_url).netloc.replace("www.", "") if normalized_url else "unknown"
+            if normalized_domain and normalized_domain in blocked_domains:
+                continue
+            candidates.append(
+                NewsCandidate(
+                    news_id=normalized_news_id,
+                    title=str(title or ""),
+                    pub_date=pub_date,
+                    url=normalized_url,
+                    category="unknown",
+                    domain=normalized_domain or "unknown",
+                    score=None,
+                    snapshot_at=None,
+                )
+            )
+            if len(candidates) >= limit:
+                break
+
         return candidates
 
     def fetch_user_onboarding_profile(self, *, user_id: int) -> dict[str, list[str]]:

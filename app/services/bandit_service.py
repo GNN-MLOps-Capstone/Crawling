@@ -198,7 +198,7 @@ class BanditService:
             for arm in self.arms
         }
         timeline_entries: list[tuple[int, str]] = []
-        arm_scores = self._compute_arm_scores(
+        arm_params = self._compute_arm_params(
             user_id=user_id,
             paths=[arm.path for arm in self.arms],
         )
@@ -206,17 +206,20 @@ class BanditService:
         while any(remaining_candidates[path] for path in remaining_candidates):
             window_entries = self._build_thompson_window(
                 remaining_candidates=remaining_candidates,
-                arm_scores=arm_scores,
+                arm_params=arm_params,
             )
             if not window_entries:
                 break
             timeline_entries.extend(window_entries)
 
+        expected_scores = {
+            path: alpha / (alpha + beta) for path, (alpha, beta) in arm_params.items()
+        }
         return MixPlan(
             timeline_entries=timeline_entries,
             mix_policy=self._count_paths(timeline_entries),
             allocator="thompson",
-            arm_scores=arm_scores,
+            arm_scores=expected_scores,
         )
 
     def _build_fixed_mix_timeline(self, *, path_candidates: dict[str, list[int]]) -> list[tuple[int, str]]:
@@ -243,7 +246,7 @@ class BanditService:
         self,
         *,
         remaining_candidates: dict[str, list[int]],
-        arm_scores: dict[str, float],
+        arm_params: dict[str, tuple[float, float]],
     ) -> list[tuple[int, str]]:
         available_paths = [arm.path for arm in self.arms if remaining_candidates.get(arm.path)]
         if not available_paths:
@@ -253,51 +256,43 @@ class BanditService:
             self.batch_size,
             sum(len(remaining_candidates[path]) for path in available_paths),
         )
-        allocation = {path: 0 for path in available_paths}
-        while sum(allocation.values()) < target_window:
-            eligible_paths = [
-                path
-                for path in available_paths
-                if allocation[path] < len(remaining_candidates[path])
-            ]
-            if not eligible_paths:
-                break
-            selected_path = max(
-                eligible_paths,
-                key=lambda path: (arm_scores.get(path, 0.0), -allocation[path], path),
-            )
-            allocation[selected_path] += 1
 
-        allocation = self._apply_minimum_allocation_guardrail_to_allocation(
-            allocation=allocation,
-            remaining_candidates=remaining_candidates,
-            arm_scores=arm_scores,
-            target_window=target_window,
-        )
-        slot_paths = self._expand_allocation_to_slots(
-            allocation=allocation,
-            arm_scores=arm_scores,
-        )
-
+        rng = random.Random(self.random_seed)
         window_entries: list[tuple[int, str]] = []
-        for path in slot_paths:
-            candidates = remaining_candidates[path]
-            if not candidates:
-                continue
-            news_id = candidates.pop(0)
-            window_entries.append((news_id, path))
+
+        for _ in range(target_window):
+            scores: dict[str, float] = {}
+            for path in available_paths:
+                alpha, beta = arm_params[path]
+                score = self._sample_beta(alpha=alpha, beta=beta, rng=rng)
+
+                # min_per_arm 가드레일: 아직 채우지 못한 arm에 bonus
+                current_count = sum(1 for _, p in window_entries if p == path)
+                if current_count < self.min_per_arm:
+                    score += 1_000_000.0
+
+                scores[path] = score
+
+            if not scores:
+                break
+
+            selected_path = max(scores, key=lambda path: scores[path])
+            news_id = remaining_candidates[selected_path].pop(0)
+            window_entries.append((news_id, selected_path))
+
+            if not remaining_candidates[selected_path]:
+                available_paths.remove(selected_path)
 
         return window_entries
 
-    def _compute_arm_scores(self, *, user_id: int | None, paths: list[str]) -> dict[str, float]:
+    def _compute_arm_params(self, *, user_id: int | None, paths: list[str]) -> dict[str, tuple[float, float]]:
         global_posteriors = self.state_store.get_global_posteriors(paths=paths)
         user_posteriors = (
             self.state_store.get_user_posteriors(user_id=user_id, paths=paths)
             if user_id is not None
             else {path: BanditPosterior() for path in paths}
         )
-        rng = random.Random(self.random_seed)
-        scores: dict[str, float] = {}
+        params: dict[str, tuple[float, float]] = {}
         for path in paths:
             global_posterior = global_posteriors.get(path, BanditPosterior())
             user_posterior = user_posteriors.get(path, BanditPosterior())
@@ -311,8 +306,8 @@ class BanditService:
                 + (global_posterior.beta * self.global_posterior_weight)
                 + (user_posterior.beta * self.user_posterior_weight)
             )
-            scores[path] = self._sample_beta(alpha=alpha, beta=beta, rng=rng)
-        return scores
+            params[path] = (alpha, beta)
+        return params
 
     @staticmethod
     def _sample_beta(*, alpha: float, beta: float, rng: random.Random) -> float:
