@@ -67,6 +67,15 @@ x-airflow-common:
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__EMAIL__EMAIL_BACKEND: airflow.utils.email.send_email_smtp
+    AIRFLOW__SMTP__SMTP_HOST: smtp.resend.com
+    AIRFLOW__SMTP__SMTP_PORT: '465'
+    AIRFLOW__SMTP__SMTP_SSL: 'True'
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'False'
+    AIRFLOW__SMTP__SMTP_USER: resend
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${RESEND_API_KEY:-}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW_SMTP_MAIL_FROM:-}
+    AIRFLOW_CONN_SMTP_DEFAULT: '{"conn_type":"smtp","host":"smtp.resend.com","port":465,"login":"resend","password":"${RESEND_API_KEY:-}","extra":{"from_email":"${AIRFLOW_SMTP_MAIL_FROM:-}"}}'
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
@@ -85,6 +94,7 @@ x-airflow-common:
     RECO_VALID_READ_DWELL_SECONDS: ${RECO_VALID_READ_DWELL_SECONDS:-5}
     RECO_BANDIT_PRIOR_ALPHA: ${RECO_BANDIT_PRIOR_ALPHA:-1}
     RECO_BANDIT_PRIOR_BETA: ${RECO_BANDIT_PRIOR_BETA:-199}
+    AIRFLOW_HEALTHCHECK_ALERT_EMAILS: ${AIRFLOW_HEALTHCHECK_ALERT_EMAILS:-}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -572,6 +582,7 @@ services:
       tests/test_gnn_training_data_loader.py
       tests/test_gnn_trainer_gate.py
       tests/test_gnn_serving_deploy.py
+      tests/test_gnn_baseline_eval.py
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
@@ -594,6 +605,87 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+    networks:
+      - news-network
+      - proxy-net
+
+  dag-wiring-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_airflow_task_wiring.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  workflow-contract-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_workflow_contracts.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  offline-artifact-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/test_offline_file_artifacts.py
+      tests/test_offline_db_artifacts.py
+    volumes:
+      - ./dags:/app/dags
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  live-readonly-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: dockerfile/gnn.Dockerfile
+      target: gnn-test
+    image: gnn-worker-test:latest
+    working_dir: /app
+    command: >
+      python -m pytest
+      tests/live
+      -m
+      "live_db and readonly"
+    environment:
+      ALLOW_LIVE_READONLY_TESTS: ${ALLOW_LIVE_READONLY_TESTS:-}
+      LIVE_DB_DSN: ${LIVE_DB_DSN:-}
+      LIVE_DB_HOST: ${LIVE_DB_HOST:-}
+      LIVE_DB_PORT: ${LIVE_DB_PORT:-5432}
+      LIVE_DB_NAME: ${LIVE_DB_NAME:-}
+      LIVE_DB_USER: ${LIVE_DB_USER:-}
+      LIVE_DB_PASSWORD: ${LIVE_DB_PASSWORD:-}
+    volumes:
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml:ro
     networks:
       - news-network
       - proxy-net

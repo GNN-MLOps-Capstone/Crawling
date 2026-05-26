@@ -8,6 +8,7 @@
 - 학습셋 생성: `dags/modules/dataset/graph_builder.py`
 - 학습 전처리: `dags/modules/training/data_loader.py`
 - 학습 평가/게이트: `dags/modules/training/trainer.py`
+- baseline 평가: `dags/modules/training/baseline_eval.py`
 - 서빙 적재: `dags/modules/serving/deploy.py`
 
 ## 테스트 파일
@@ -30,6 +31,9 @@
     `test_service_embeddings` 적재용 row로 바꾸는 과정이 맞는지 검증
   - 배포 성공 후 MLflow status tag가 `product/legacy`로 갱신되는지 검증
 
+- `tests/test_gnn_baseline_eval.py`
+  - baseline embedding method의 positive/random similarity separation과 hit@k 계산을 검증
+
 ## 실행 전제
 
 - 이 테스트들은 일반 추천 API 테스트보다 의존성이 많다.
@@ -51,9 +55,10 @@ tests/test_gnn_graph_builder.py
 tests/test_gnn_training_data_loader.py
 tests/test_gnn_trainer_gate.py
 tests/test_gnn_serving_deploy.py
+tests/test_gnn_baseline_eval.py
 ```
 
-최근 확인 결과는 `15 passed, 2 warnings`이다.
+최근 확인 결과는 `16 passed, 2 warnings`이다.
 warning은 PyG 내부 deprecation warning과 `graph_builder.py`의 tensor 생성 성능 warning이며, 테스트 실패 조건은 아니다.
 
 ## 원칙

@@ -2,21 +2,26 @@
 
 이 문서는 현재 `tests/` 아래 테스트 파일과 각 테스트가 검증하는 계약을 정리한다.
 pytest의 `collected items`는 테스트 파일 개수가 아니라 `def test_*` 함수와 parameterized case 단위다.
+전체 테스트 레이어와 실행 시점 요약은 `docs/testing_overview.md`를 먼저 본다.
 
 ## 요약
 
-- 테스트 파일: 7개
-- 테스트 함수: 41개
-- pytest item 기준 예상 수: 43개
+- 테스트 파일: 13개
+- 테스트 함수: 63개
+- pytest item 기준 예상 수: 65개
   - `tests/test_gnn_trainer_gate.py`의 parameterized 테스트 1개가 3개 item으로 수집된다.
 - `tests/test_recommend_api.py`만 실행하면 현재 28개 item이 수집된다.
 
 ## 실행 환경
 
-현재 공식 로컬 검증은 두 컨테이너 경로로 나눈다.
+현재 공식 로컬 검증은 컨테이너 경로와 정적 DAG wiring 검증으로 나눈다.
 
 - 추천 API 변경: `recommend-api` 컨테이너에서 API 테스트 실행
 - DAG module / GNN 변경: `gnn-worker` 기반 `gnn-test` 서비스에서 module/GNN 테스트 실행
+- DAG task wiring 변경: `dag-wiring-test` 서비스에서 정적 wiring 테스트 실행
+- Workflow contract 변경: `workflow-contract-test` 서비스에서 정적 workflow 계약 테스트 실행
+- Offline artifact 변경: `offline-artifact-test` 서비스에서 운영 리소스 미접속 산출물 테스트 실행
+- Live read-only 변경: `live-readonly-test` 서비스에서 opt-in 운영/스테이징 DB read-only 테스트 실행
 
 `airflow-*` 컨테이너는 DAG 운영 런타임이고, `jupyter` 컨테이너는 노트북/실험 작업 공간이다.
 둘 다 현재 테스트 러너로 사용하지 않는다.
@@ -56,8 +61,54 @@ docker compose run --rm gnn-test python -m pytest \
   tests/test_gnn_graph_builder.py \
   tests/test_gnn_training_data_loader.py \
   tests/test_gnn_trainer_gate.py \
-  tests/test_gnn_serving_deploy.py
+  tests/test_gnn_serving_deploy.py \
+  tests/test_gnn_baseline_eval.py
 ```
+
+### DAG Task Wiring 테스트
+
+`tests/test_airflow_task_wiring.py`는 Airflow 런타임 실행 테스트가 아니라 DAG 소스를 AST로 읽는 정적 wiring 테스트다.
+GNN 런타임 검증이 아니므로 `gnn-test` 기본 묶음에는 포함하지 않는다.
+
+pytest가 있는 환경에서 단독 실행한다.
+
+```bash
+docker compose run --rm dag-wiring-test
+```
+
+### Workflow Contract 테스트
+
+`tests/test_workflow_contracts.py`는 crawling, ingestion, training, metric aggregation workflow의 입력/산출물 계약을 정적으로 검증한다.
+Airflow runtime E2E가 아니라 DAG 간 trigger conf, task return key, S3/DB path 규칙, Docker environment 계약을 고정한다.
+
+```bash
+docker compose run --rm workflow-contract-test
+```
+
+### Offline Artifact 테스트 계획
+
+운영 DB/S3/Redis/MLflow에 붙지 않고 DB row, parquet file, model artifact, payload 산출물 계약을 검증하는 계획은 `docs/offline_artifact_test_plan.md`에 정리한다.
+현재 구현된 offline artifact 테스트는 별도 서비스로 실행한다.
+
+```bash
+docker compose run --rm offline-artifact-test
+```
+
+### Live Read-Only 테스트 계획
+
+운영 또는 스테이징 DB를 read-only로 점검하는 live test 설계는 `docs/live_readonly_test_plan.md`에 정리한다.
+기본 테스트 명령에는 포함하지 않고, 구현 시에도 `ALLOW_LIVE_READONLY_TESTS=1` 같은 명시적 opt-in과 별도 marker/service로 분리한다.
+
+```bash
+ALLOW_LIVE_READONLY_TESTS=1 docker compose run --rm live-readonly-test
+```
+
+opt-in 환경변수가 없으면 live DB에 연결하지 않고 skip된다.
+
+### Operational Health Check DAG
+
+정기 운영 상태 점검용 DAG는 `docs/operational_health_check_dag.md`에 정리한다.
+`operational_health_check_daily`는 매일 KST 04:30 실행되며, schema/news/recommendation/embedding 상태를 read-only로 확인한다.
 
 ## 테스트 파일별 목적
 
@@ -181,6 +232,83 @@ GNN embedding serving deploy 절차를 검증한다.
   - MLflow artifact의 `node_embeddings.pkl`, `node_mapping.pkl`을 DB insert row로 변환하는지 검증한다.
   - deploy 성공 후 기존 product run은 `legacy`, 새 candidate run은 `product`로 태그 변경되는지 검증한다.
 
+### `tests/test_gnn_baseline_eval.py`
+
+GNN baseline evaluation 유틸의 embedding method 비교 계약을 검증한다.
+
+- `test_embedding_baseline_reports_similarity_separation`
+  - positive pair와 random pair의 similarity separation, hit@k metric이 기대대로 계산되는지 검증한다.
+
+### `tests/test_airflow_task_wiring.py`
+
+crawling, ingestion, training 관련 Airflow DAG의 task wiring을 정적으로 검증한다.
+Airflow 런타임 실행이 아니라 DAG 소스의 task id, dependency chain, operator/trigger 설정, 컨테이너 환경 변수 연결을 확인한다.
+
+- `test_news_crawling_dag_wires_collect_crawl_and_hourly_trigger`
+  - 뉴스 수집 DAG가 Naver 수집, 크롤링, hourly integration trigger 순서로 연결되는지 검증한다.
+- `test_hourly_ingestion_dag_keeps_incremental_pipeline_order_and_trigger_conf`
+  - hourly ingestion의 bronze, target resolve, refinement, Gemini, filter, DB load, metrics trigger 순서와 trigger conf를 검증한다.
+- `test_daily_finalize_dag_keeps_daily_merge_snapshot_and_report_dependencies`
+  - daily finalize DAG가 incremental path 수집, refined/analysis daily merge, keyword snapshot, report fan-in 순서를 유지하는지 검증한다.
+- `test_recommendation_metrics_dag_wires_sql_snapshots_and_bandit_update`
+  - 추천 path metrics DAG가 hourly SQL 집계, path C/A2 snapshot 생성, bandit posterior 갱신 순서를 유지하는지 검증한다.
+- `test_gnn_trainset_creation_dag_wires_context_to_graph_builder_container`
+  - 학습셋 생성 DAG가 snapshot context를 Docker graph builder task 환경 변수로 전달하는지 검증한다.
+- `test_gnn_training_dag_wires_train_evaluate_gate_and_deploy_trigger`
+  - GNN training DAG가 train, evaluation, candidate gate, graph2db trigger 순서와 환경 변수를 유지하는지 검증한다.
+- `test_graph_to_db_dag_wires_serving_config_to_deploy_container`
+  - graph2db DAG가 MLflow artifact, S3, DB 설정을 deploy 컨테이너에 전달하는지 검증한다.
+
+### `tests/test_workflow_contracts.py`
+
+crawling, ingestion, training, metric aggregation workflow의 산출물 계약을 정적으로 검증한다.
+상세 설계는 `docs/workflow_test_plan.md`를 기준으로 한다.
+
+- `test_crawling_workflow_trigger_contract_matches_hourly_ingestion_params`
+  - `news_dag`가 hourly ingestion DAG에 넘기는 `window_start/window_end` trigger conf와 downstream params가 일치하는지 검증한다.
+- `test_ingestion_workflow_artifact_contracts_flow_to_metrics_trigger`
+  - hourly ingestion의 bronze, target, refinement, Gemini, DB loading, metrics trigger 산출물 key 계약을 검증한다.
+- `test_daily_finalize_workflow_preserves_incremental_to_daily_output_contract`
+  - daily finalize가 incremental prefix를 daily parquet output과 report key로 변환하는 계약을 검증한다.
+- `test_training_workflow_path_candidate_and_deploy_contracts_align`
+  - trainset creation, training, graph2db 사이의 path, candidate version, deploy env 계약을 검증한다.
+- `test_metric_aggregation_workflow_consumes_trigger_window_and_updates_bandit_state`
+  - recommendation metrics DAG가 trigger window, SQL path, bandit posterior 입력 계약을 유지하는지 검증한다.
+
+### `tests/test_offline_file_artifacts.py`
+
+운영 S3에 접속하지 않고 parquet/file 산출물 계약을 검증한다.
+
+- `test_bronze_window_writer_creates_incremental_parquet_with_expected_schema`
+  - bronze incremental writer가 window partition key에 parquet를 저장하고 downstream 필수 컬럼을 유지하는지 검증한다.
+- `test_post_gemini_filter_rewrites_incremental_parquets_and_captures_filtered_ids`
+  - post-Gemini filter가 refined/stocks/keywords/analysis incremental parquet를 같은 key에 재저장하고 filtered out id를 산출하는지 검증한다.
+
+### `tests/test_offline_db_artifacts.py`
+
+운영 DB에 접속하지 않고 DB row/SQL 산출물 계약을 검증한다.
+
+- `test_news_loader_builds_filtered_news_upsert_rows`
+  - refined parquet가 `filtered_news` upsert tuple로 변환되는지 검증한다.
+- `test_keyword_loader_builds_master_keyword_upsert_rows`
+  - keyword embedding parquet가 `keywords` upsert tuple로 변환되는지 검증한다.
+- `test_recommendation_snapshot_sql_files_expose_downstream_contract_columns`
+  - recommendation metrics/path snapshot SQL이 downstream이 기대하는 table과 column 계약을 포함하는지 검증한다.
+
+### `tests/live/test_live_readonly_db.py`
+
+운영 또는 스테이징 DB를 read-only로 조회하는 opt-in live test다.
+`ALLOW_LIVE_READONLY_TESTS=1` 없이는 DB에 연결하지 않고 skip된다.
+
+- `test_live_schema_exposes_required_tables_and_columns`
+  - 운영 DB가 코드가 기대하는 주요 table/column 계약을 제공하는지 검증한다.
+- `test_live_news_tables_have_joinable_recent_outputs`
+  - news/crawled/filtered 테이블이 join 가능하고 기본 산출물이 존재하는지 검증한다.
+- `test_live_recommendation_snapshots_and_bandit_state_have_valid_shape`
+  - recommendation metrics, path snapshot, bandit state shape이 유효한지 검증한다.
+- `test_live_embedding_serving_table_has_entity_types_and_model_version`
+  - serving embedding table에 entity type과 model version이 존재하는지 검증한다.
+
 ## 최근 확인 결과
 
 다음 명령으로 추천 API 테스트를 확인했다.
@@ -204,10 +332,66 @@ docker compose run --rm gnn-test
 최근 확인 결과:
 
 ```text
-15 passed, 2 warnings
+16 passed, 2 warnings
 ```
 
 warning 2개는 테스트 실패가 아니다.
 
 - `torch_geometric.distributed` deprecation warning: PyG 내부 import 과정에서 발생한다.
 - `graph_builder.py` tensor 생성 warning: `numpy.ndarray` list를 바로 tensor로 만드는 성능 경고다.
+
+DAG task wiring 테스트는 다음 명령으로 단독 확인했다.
+
+```bash
+docker compose run --rm dag-wiring-test
+```
+
+최근 확인 결과:
+
+```text
+7 passed
+```
+
+Workflow contract 테스트는 다음 명령으로 단독 실행한다.
+
+```bash
+docker compose run --rm workflow-contract-test
+```
+
+최근 확인 결과:
+
+```text
+5 passed
+```
+
+Offline artifact 테스트는 다음 명령으로 단독 실행한다.
+
+```bash
+docker compose run --rm offline-artifact-test
+```
+
+최근 확인 결과:
+
+```text
+5 passed
+```
+
+Live read-only 테스트는 opt-in 없이 다음 명령으로 skip 동작을 확인했다.
+
+```bash
+docker compose run --rm live-readonly-test
+```
+
+최근 확인 결과:
+
+```text
+4 skipped
+```
+
+Operational health check DAG는 Airflow 컨테이너에서 문법 검증과 DAG 목록 노출을 확인했다.
+
+```bash
+docker compose exec -T airflow-scheduler python -m py_compile /opt/airflow/dags/operational_health_check_daily_dag.py
+docker compose exec -T airflow-scheduler airflow dags unpause operational_health_check_daily
+docker compose exec -T airflow-scheduler airflow dags list
+```

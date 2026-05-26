@@ -21,6 +21,7 @@ class RecommendNewsRequest(BaseModel):
     limit: int = Field(ge=1, le=settings.default_limit_max)
     cursor: str | None = None
     request_id: str | None = None
+    force_refresh: bool = False
     # Debug-only override. Normal recommendation flow loads user signals internally by user_id.
     context: RecommendDebugContext = Field(default_factory=RecommendDebugContext)
 
